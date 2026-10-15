@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bitchat-core",
+    "crates/bitchat-nostr",
+    "crates/bitchat-ble",
+    "crates/bitchat-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+repository = "https://github.com/Letdown2491/bitchat-rs"
+
+[workspace.dependencies]
+# Wire format / crypto (bitchat-core)
+snow = "0.10"
+x25519-dalek = "2"
+ed25519-dalek = "2"
+sha2 = "0.10"
+flate2 = "1"
+hex = "0.4"
+chacha20poly1305 = "0.10"
+thiserror = "2"
+num_enum = "0.7"
+
+# Nostr transport (bitchat-nostr)
+secp256k1 = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# BLE transport (bitchat-ble)
+bluer = "0.17"
+
+# UI (bitchat-app)
+# gpui = "*"  # uncommented when the M0 window lands; needs recent stable rust
+
+[profile.release]
+lto = "thin"

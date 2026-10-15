@@ -1,0 +1,12 @@
+/target
+Cargo.lock.bak
+*.publish.toml.bak
+tree/
+self/tree/files
+self/tree/export
+.DerivedData
+.direnv
+
+# publisher key never lives in the repo
+*.key
+publisher.key

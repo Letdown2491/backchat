@@ -1,0 +1,13 @@
+[package]
+name = "bitchat-nostr"
+description = "bitchat over Nostr: geohash channels, bitchat1: embedded packets, private envelopes (kind 13/14/1059)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bitchat-core = { path = "../bitchat-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
