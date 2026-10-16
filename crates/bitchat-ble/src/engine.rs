@@ -24,7 +24,9 @@ use crate::fragment::{Assembled, FragmentAssembler, FragmentHeader};
 use crate::DEFAULT_TTL;
 
 /// Registry entry lifetime (upstream marks peers gone after 6 min).
-pub const PEER_EXPIRY_MS: u64 = 360_000;
+/// Peers vanish after this long without any packet from them (upstream
+/// `Mesh.STALE_PEER_TIMEOUT_MS`).
+pub const PEER_EXPIRY_MS: u64 = 180_000;
 /// Re-announce at most this often when reacting to new peers.
 pub const ANNOUNCE_THROTTLE_MS: u64 = 10_000;
 
