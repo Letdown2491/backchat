@@ -92,6 +92,11 @@ pub struct ChatStore {
     dms: HashMap<[u8; 8], Vec<DmLine>>,
     /// Unread DM count per peer; cleared when the conversation is opened.
     unread: HashMap<[u8; 8], usize>,
+    /// Event ids already processed. Every relay we subscribe to delivers
+    /// the same event, so this is the dedup gate. Bounded: `seen_order`
+    /// evicts oldest first.
+    seen_events: HashSet<String>,
+    seen_order: std::collections::VecDeque<String>,
     /// Channel-discovery scan state (see RelayCommand::Discover).
     scan: HashMap<String, ScanCell>,
     scanning: bool,
@@ -127,6 +132,8 @@ impl ChatStore {
             dms: HashMap::new(),
             unread: HashMap::new(),
             mesh_restarting: false,
+            seen_events: HashSet::new(),
+            seen_order: std::collections::VecDeque::new(),
             scan: HashMap::new(),
             scanning: false,
             geo: None,
@@ -175,6 +182,10 @@ impl ChatStore {
         self.geohash = Some(geohash_str.clone());
         self.persona = Some(geohash::derive_geohash_identity(&self.device_seed, &geohash_str));
         self.peers.clear();
+        // Each channel is its own space: the previous channel's messages
+        // and the discovery scan have no business here.
+        self.channel.clear();
+        self.scan.clear();
         self.log_channel(format!("joined #{geohash_str}. identity rotates per channel"));
         self.end_browse();
         self.note_channel_visit(&geohash_str);
@@ -274,6 +285,16 @@ impl ChatStore {
         // Structural validation before trusting anything.
         if !event.within_inbound_limits() || !event.is_valid_signature() {
             return;
+        }
+        // All subscribed relays carry the same events; process each once.
+        if self.seen_events.contains(&event.id) {
+            return;
+        }
+        self.seen_events.insert(event.id.clone());
+        self.seen_order.push_back(event.id.clone());
+        while self.seen_order.len() > 4096 {
+            let oldest = self.seen_order.pop_front().expect("len checked");
+            self.seen_events.remove(&oldest);
         }
         match event.kind {
             kinds::EPHEMERAL_EVENT => {
@@ -948,6 +969,46 @@ mod tests {
             }
         }
         assert!(saw_off);
+    }
+
+    #[test]
+    fn joining_a_channel_starts_fresh() {
+        let mut store = store_with_channel();
+        store.on_relay_event(geohash::create_ephemeral_geohash_event(
+            "old cell traffic", "dr5rs", &Identity::generate(), None, false,
+        ));
+        assert!(store.channel.len() > 1); // join line + message
+        store.begin_browse();
+        store.on_relay_event(geohash::create_ephemeral_geohash_event(
+            "scan noise", "zz9zz", &Identity::generate(), None, false,
+        ));
+        assert!(!store.scan.is_empty());
+
+        // Joining elsewhere: the old cell's log and the scan are gone.
+        store.join("9q8yy");
+        let stale = store.channel.iter().any(|l| matches!(
+            l,
+            ChatLine::Message { content, .. } if content.contains("old cell")
+        ));
+        assert!(!stale);
+        assert!(store.scan.is_empty());
+    }
+
+    #[test]
+    fn the_same_event_from_five_relays_renders_once() {
+        let mut store = store_with_channel();
+        let event = geohash::create_ephemeral_geohash_event(
+            "hello channel", "dr5rs", &Identity::generate(), None, false,
+        );
+        for _ in 0..5 {
+            store.on_relay_event(event.clone());
+        }
+        let messages = store
+            .channel
+            .iter()
+            .filter(|l| matches!(l, ChatLine::Message { content, .. } if content == "hello channel"))
+            .count();
+        assert_eq!(messages, 1);
     }
 
     #[test]

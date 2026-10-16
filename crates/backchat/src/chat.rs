@@ -60,6 +60,7 @@ pub struct ChatView {
     last_space: Space,
     /// Channel browser open (the `#` space's discovery view).
     browsing: bool,
+    last_browsing: bool,
 }
 
 impl ChatView {
@@ -153,6 +154,7 @@ impl ChatView {
             last_count: 0,
             last_space: Space::Nearby,
             browsing: false,
+            last_browsing: false,
         }
     }
 
@@ -292,18 +294,21 @@ impl Render for ChatView {
         if browsing {
             self.last_count = 0;
             self.last_space = space.clone();
+            self.last_browsing = true;
         } else {
-            // Follow the tail only when the reader is at the bottom (or just
-            // switched spaces); never yank someone reading history.
+            // Follow the tail only when the reader is at the bottom, or just
+            // switched spaces / left the browser; never yank someone reading
+            // history.
             let count = lines.len();
             let at_bottom =
                 self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
-            let switched = self.last_space != space;
+            let switched = self.last_space != space || self.last_browsing != browsing;
             if count > 0 && (switched || (count != self.last_count && at_bottom)) {
                 self.log_scroll.scroll_to_item(count - 1);
             }
             self.last_count = count;
             self.last_space = space.clone();
+            self.last_browsing = false;
         }
 
         // Contextual composer hint.
