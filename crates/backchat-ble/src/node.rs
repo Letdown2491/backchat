@@ -137,10 +137,10 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
         }
 
         loop {
-            // Heal check: the link has been reporting hard connect failures
-            // and nothing has arrived inbound for a long while: the adapter
-            // is wedged. Rebuild the radio around a power cycle; the engine
-            // (identity, sessions, registry) survives untouched.
+            // Heal check: the link has been reporting adapter-level failures
+            // (NotReady) and nothing has arrived inbound for a long while:
+            // the adapter is wedged. Rebuild the radio around a power cycle;
+            // the engine (identity, sessions, registry) survives untouched.
             {
                 let now = now_ms();
                 let wedged = link.wedge_failures.load(std::sync::atomic::Ordering::Relaxed);

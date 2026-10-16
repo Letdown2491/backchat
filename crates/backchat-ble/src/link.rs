@@ -17,9 +17,11 @@ const MAX_CENTRAL_LINKS: usize = 8;
 /// Skip peers weaker than this (upstream BALANCED power profile).
 const MIN_RSSI: i32 = -85;
 /// Don't reconnect to an address whose link ended in a hard failure for
-/// this long. Stale RPAs from bystander devices rotate on their own; this
-/// just stops us from hammering a dying connection over and over.
-const CONNECT_BACKOFF_MS: u64 = 5 * 60_000;
+/// this long. A phone that walked away re-advertises under a rotated RPA
+/// minutes later; the phone-initiated path (it connects to our
+/// advertisement) usually beats us there anyway, so central connects stay
+/// patient and rare.
+const CONNECT_BACKOFF_MS: u64 = 30_000;
 /// A busy BlueZ rejects connects with "In Progress" / "Busy" while another
 /// procedure (a disconnect winding down, an LE scan hop, another client's
 /// connect) is still running. That is transient: short cooldown, no wedge
@@ -80,8 +82,8 @@ pub struct LinkHandle {
     pub inbound_rx: mpsc::Receiver<Vec<u8>>,
     /// Raw packets to transmit.
     pub outbound_tx: OutboundTx,
-    /// Consecutive hard connect failures (D-Bus timeouts / NotReady) that
-    /// suggest the adapter is wedged; cleared on any successful connect.
+    /// Consecutive adapter-level connect failures (NotReady) that suggest
+    /// the adapter itself is wedged; cleared on any successful connect.
     pub wedge_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// The outbound pump task.
     pub task: tokio::task::JoinHandle<()>,
@@ -124,6 +126,43 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     let central_enabled = std::env::var_os("BACKCHAT_NO_CENTRAL").is_none();
     if !central_enabled {
         eprintln!("{} link: central role disabled (BACKCHAT_NO_CENTRAL): peripheral only", ts());
+    }
+
+    // Startup sweep: bluetoothd keeps a peripheral connection alive after
+    // our process exits, and the phone keeps its central side up too. The
+    // phone then believes it is talking to a dead GATT registration and
+    // never re-scans or reconnects, so every restart is deaf until the
+    // link happens to die on its own (observed: the phone stayed connected
+    // for the rest of a test day, writing packets to stale handles). Any
+    // device still connected that advertises our service UUID is by
+    // definition a leftover from a previous run: this instance has not
+    // existed long enough to have live subscribers. Disconnecting it makes
+    // the phone drop, re-scan, and come back fresh.
+    match adapter.device_addresses().await {
+        Ok(addrs) => {
+            for addr in addrs {
+                let device = match adapter.device(addr) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let connected = device.is_connected().await.unwrap_or(false);
+                if !connected {
+                    continue;
+                }
+                let serves_us = device
+                    .uuids()
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .contains(&service_uuid);
+                if serves_us {
+                    eprintln!("{} link: startup sweep: disconnecting stale peer {addr}", ts());
+                    let _ = device.disconnect().await;
+                }
+            }
+        }
+        Err(e) => eprintln!("{} link: startup sweep: device list unavailable: {e}", ts()),
     }
 
     let links = std::sync::Arc::new(tokio::sync::Mutex::new(Links {
@@ -362,18 +401,18 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                 .await;
                                 if let Err(ref err) = result {
                                     // Classify the failure: a busy BlueZ
-                                    // ("In Progress", "Busy") is transient, a
-                                    // silent adapter (D-Bus timeouts, NotReady)
-                                    // suggests a wedge, everything else is a
-                                    // hard failure for this address.
+                                    // ("In Progress", "Busy") is transient; a
+                                    // connect timeout to an absent phone is a
+                                    // normal mesh miss (NOT a wedge: it was
+                                    // over-counting and power-cycling the
+                                    // adapter on ordinary misses); "NotReady"
+                                    // means the adapter itself is sick.
                                     let msg = err.to_string();
                                     let (wedge, cooldown) = if msg.contains("InProgress")
                                         || msg.contains("Busy")
                                     {
                                         (false, TRANSIENT_BACKOFF_MS)
-                                    } else if msg.contains("Timeout")
-                                        || msg.contains("NotReady")
-                                    {
+                                    } else if msg.contains("NotReady") {
                                         (true, CONNECT_BACKOFF_MS)
                                     } else {
                                         (false, CONNECT_BACKOFF_MS)

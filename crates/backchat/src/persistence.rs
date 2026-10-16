@@ -29,17 +29,28 @@ pub struct ChannelMemo {
 }
 
 pub fn state_dir() -> PathBuf {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("backchat")
+    let xdg = std::env::var("XDG_STATE_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    state_dir_from(xdg, home)
+}
+
+/// XDG state dir resolution, split from the process environment so the
+/// roundtrip test can exercise the real logic without the env-var races
+/// of parallel test threads (two tests touching `set_var` on the same
+/// process have been a heisenflake forever).
+fn state_dir_from(xdg: Option<String>, home: Option<String>) -> PathBuf {
+    xdg.map(PathBuf::from)
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("backchat")
 }
 
 /// Load or create (and persist) the device seed.
 pub fn load_or_create_device_seed() -> Result<[u8; 32], String> {
-    let dir = state_dir();
+    load_or_create_device_seed_in(&state_dir())
+}
+
+fn load_or_create_device_seed_in(dir: &std::path::Path) -> Result<[u8; 32], String> {
     let path = dir.join("device-seed.hex");
     if let Ok(hex_str) = fs::read_to_string(&path) {
         let bytes = hex::decode(hex_str.trim())
@@ -55,7 +66,11 @@ pub fn load_or_create_device_seed() -> Result<[u8; 32], String> {
 }
 
 pub fn load_settings() -> Settings {
-    let path = state_dir().join("settings.json");
+    load_settings_in(&state_dir())
+}
+
+fn load_settings_in(dir: &std::path::Path) -> Settings {
+    let path = dir.join("settings.json");
     fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -63,8 +78,11 @@ pub fn load_settings() -> Settings {
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
-    let dir = state_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    save_settings_in(&state_dir(), settings)
+}
+
+fn save_settings_in(dir: &std::path::Path, settings: &Settings) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("create {dir:?}: {e}"))?;
     let path = dir.join("settings.json");
     fs::write(&path, serde_json::to_string_pretty(settings).unwrap())
         .map_err(|e| format!("write {path:?}: {e}"))
@@ -76,14 +94,17 @@ mod tests {
 
     #[test]
     fn device_seed_roundtrip() {
-        // Point XDG at a throwaway dir.
-        let dir = std::env::temp_dir().join(format!("backchat-test-{}", std::process::id()));
-        // SAFETY: test-only, single-threaded mutation before any threads spawn.
-        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+        // Throwaway dir; the `_in` variants take the path directly, so no
+        // process-env mutation (those raced with sibling test threads).
+        let dir = std::env::temp_dir().join(format!(
+            "backchat-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let a = load_or_create_device_seed().unwrap();
-        let b = load_or_create_device_seed().unwrap();
+        let a = load_or_create_device_seed_in(&dir).unwrap();
+        let b = load_or_create_device_seed_in(&dir).unwrap();
         assert_eq!(a, b, "seed must be stable across loads");
 
         // Settings roundtrip.
@@ -93,8 +114,8 @@ mod tests {
             relays: vec!["wss://relay.example".into()],
             channels: vec![ChannelMemo { geohash: "9q8yy".into(), last_seen: 0 }],
         };
-        save_settings(&settings).unwrap();
-        assert_eq!(load_settings(), settings);
+        save_settings_in(&dir, &settings).unwrap();
+        assert_eq!(load_settings_in(&dir), settings);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -111,6 +111,16 @@ peer plus a 500-packet broadcast-message ring, answers REQUEST_SYNC
 with those at TTL 0, directed routing only - we don't parse the
 requester's GCS filter, dedup makes the extra sends harmless).
 
+Linux link hygiene (no upstream equivalent, phone-side behavior we
+must absorb): bluetoothd keeps a peripheral connection alive after our
+process exits and the phone keeps its central side up, so a restarted
+app inherits a phone connected to a dead GATT registration that never
+reconnects. On startup the link sweeps connected devices serving our
+service UUID and disconnects them (the phone re-scans and returns
+fresh). Central connects are patient (30s per-address backoff; connect
+timeouts to absent phones are normal misses, only adapter-level
+NotReady feeds the wedge/heal path).
+
 Upstream's adaptive relay probability (PacketRelayManager, kicks in
 above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported - always
 relay below that scale.
