@@ -149,15 +149,40 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     };
     let adv_handle = adapter.advertise(advertisement).await?;
 
-    let (char_control, char_control_handle) = characteristic_control();    let application = Application {
+    let (char_control, char_control_handle) = characteristic_control();
+    // Inbound packets arrive as characteristic writes from centrals. The
+    // Fun method is load-bearing: with the Io method bluer's WriteValue
+    // handler returns NotSupported, so bluetoothd drops every Write
+    // Command from the phone before it ever reaches us (observed: phone
+    // connects, subscribes, its announce never arrives, link dies).
+    // Both write flags are set: Android bitchat writes without response,
+    // accepting with-response too costs nothing.
+    let inbound_for_write = inbound_tx.clone();
+    let write_fun: bluer::gatt::local::CharacteristicWriteFun = Box::new(
+        move |value: Vec<u8>, req: bluer::gatt::local::CharacteristicWriteRequest| {
+            let inbound_tx = inbound_for_write.clone();
+            Box::pin(async move {
+                crate::radio_log!(
+                    "{} peripheral: packet ({:?}, {} bytes) from {}",
+                    ts(), req.op_type, value.len(), req.device_address
+                );
+                if inbound_tx.send(value).await.is_err() {
+                    eprintln!("{} peripheral: inbound drop: engine gone", ts());
+                }
+                Ok(())
+            })
+        },
+    );
+    let application = Application {
         services: vec![Service {
             uuid: service_uuid,
             primary: true,
             characteristics: vec![Characteristic {
                 uuid: CHARACTERISTIC_UUID,
                 write: Some(CharacteristicWrite {
+                    write: true,
                     write_without_response: true,
-                    method: CharacteristicWriteMethod::Io,
+                    method: CharacteristicWriteMethod::Fun(write_fun),
                     ..Default::default()
                 }),
                 notify: Some(CharacteristicNotify {
