@@ -46,13 +46,13 @@ fn ts() -> String {
 
 use bluer::adv::{Advertisement, Type as AdvType};
 use bluer::gatt::local::{
-    characteristic_control, Application, Characteristic, CharacteristicControlEvent,
-    CharacteristicNotify, CharacteristicNotifyMethod, CharacteristicWrite,
+    characteristic_control, Application, Characteristic, CharacteristicNotify,
+    CharacteristicNotifyMethod, CharacteristicNotifier, CharacteristicWrite,
     CharacteristicWriteMethod, Service,
 };
 use bluer::{AdapterEvent, DiscoveryFilter, DiscoveryTransport};
 use futures::{pin_mut, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use backchat_core::message_type::MessageType;
@@ -65,12 +65,12 @@ pub type OutboundTx = mpsc::Sender<Vec<u8>>;
 /// Raw packet bytes received from any radio path.
 pub type InboundTx = mpsc::Sender<Vec<u8>>;
 
-/// Shared link state: peripheral notify writers (one per subscribed
+/// Shared link state: peripheral notify sinks (one per subscribed
 /// central), connected remote devices (central role), and which mesh peer
 /// each central link speaks for (learned from announces, used to route
 /// unicast frames).
 struct Links {
-    writers: Vec<bluer::gatt::CharacteristicWriter>,
+    writers: Vec<CharacteristicNotifier>,
     remotes: HashMap<bluer::Address, mpsc::Sender<Vec<u8>>>,
     /// mesh peer id → the central address it was announced over.
     peer_addr: HashMap<[u8; 8], bluer::Address>,
@@ -212,17 +212,28 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                     local_name: Some(adv_nickname.clone()),
                     ..Default::default()
                 };
-                let handle = match adapter.advertise(advertisement).await {
-                    Ok(handle) => handle,
-                    Err(e) => {
-                        eprintln!(
-                            "{} peripheral: advertisement registration failed ({e}): retrying in 5s",
-                            ts()
-                        );
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
+                let handle =
+                    match tokio::time::timeout(Duration::from_secs(15), adapter.advertise(advertisement)).await {
+                        Ok(Ok(handle)) => handle,
+                        // Registration failure or a hang (a dead bluetoothd
+                        // leaves calls wedged, not erroring): retry either way.
+                        Ok(Err(e)) => {
+                            eprintln!(
+                                "{} peripheral: advertisement registration failed ({e}): retrying in 5s",
+                                ts()
+                            );
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "{} peripheral: advertisement registration hung >15s: retrying in 5s",
+                                ts()
+                            );
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
                 eprintln!("{} peripheral: advertising as {:?}", ts(), adv_nickname);
                 // Hold the handle until bluetoothd reports no active
                 // instances (two consecutive zero readings, so a mid-flight
@@ -238,21 +249,29 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 let mut errs = 0;
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                    match adapter.active_advertising_instances().await {
-                        Ok(0) => {
+                    // Bound every poll: a dying bluetoothd leaves calls
+                    // wedged rather than erroring, and an unbounded call
+                    // would hang this watchdog forever.
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        adapter.active_advertising_instances(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(0)) => {
                             zeros += 1;
                             errs = 0;
                         }
-                        Ok(_) => {
+                        Ok(Ok(_)) => {
                             zeros = 0;
                             errs = 0;
                         }
-                        Err(_) => {
+                        Ok(Err(_)) | Err(_) => {
                             zeros = 0;
                             errs += 1;
                             if errs >= 3 {
                                 eprintln!(
-                                    "{} peripheral: adapter unreachable over D-Bus for 15s (bluetoothd restarted or crashed): flagging the session for a rebuild",
+                                    "{} peripheral: adapter unreachable over D-Bus (bluetoothd restarted or crashed): flagging the session for a rebuild",
                                     ts()
                                 );
                                 dbus_dead.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -274,7 +293,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         })
     };
 
-    let (char_control, char_control_handle) = characteristic_control();
+    let (_char_control, char_control_handle) = characteristic_control();
     // Inbound packets arrive as characteristic writes from centrals. The
     // Fun method is load-bearing: with the Io method bluer's WriteValue
     // handler returns NotSupported, so bluetoothd drops every Write
@@ -312,7 +331,27 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 }),
                 notify: Some(CharacteristicNotify {
                     notify: true,
-                    method: CharacteristicNotifyMethod::Io,
+                    // Fun (StartNotify) on purpose: with Io, every
+                    // subscription runs bluetoothd's AcquireNotify path,
+                    // which segfaulted bluetoothd 5.87 twice, seconds after
+                    // the phone subscribed, killing the whole stack. The
+                    // StartNotify path forwards our updates as property
+                    // changes and is the old, battle-tested route. The
+                    // callback must return promptly (StartNotify waits on
+                    // it), so it only hands the notifier to the pump.
+                    method: CharacteristicNotifyMethod::Fun(Box::new({
+                        let links = links.clone();
+                        move |notifier| {
+                            let links = links.clone();
+                            Box::pin(async move {
+                                eprintln!(
+                                    "{} peripheral: central subscribed to notifications",
+                                    ts()
+                                );
+                                links.lock().await.writers.push(notifier);
+                            })
+                        }
+                    })),
                     ..Default::default()
                 }),
                 control_handle: char_control_handle,
@@ -323,44 +362,6 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         ..Default::default()
     };
     let app_handle = adapter.serve_gatt_application(application).await?;
-
-    // Peripheral control loop: accept writes (inbound packets) and notify
-    // subscriptions (outbound sinks).
-    {
-        let links = links.clone();
-        let inbound_tx = inbound_tx.clone();
-        tokio::spawn(async move {
-            pin_mut!(char_control);
-            while let Some(event) = char_control.next().await {
-                match event {
-                    CharacteristicControlEvent::Write(req) => {
-                        eprintln!("{} peripheral: central write channel opened (mtu {})", ts(), req.mtu());
-                        let mtu = req.mtu();
-                        if let Ok(mut reader) = req.accept() {
-                            let inbound_tx = inbound_tx.clone();
-                            tokio::spawn(async move {
-                                let mut buf = vec![0u8; mtu.max(64)];
-                                loop {
-                                    match reader.read(&mut buf).await {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => {
-                                            if inbound_tx.send(buf[..n].to_vec()).await.is_err() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    CharacteristicControlEvent::Notify(notifier) => {
-                        eprintln!("{} peripheral: central subscribed to notifications (mtu {})", ts(), notifier.mtu());
-                        links.lock().await.writers.push(notifier);
-                    }
-                }
-            }
-        });
-    }
 
     // ---- Central: scan for peers advertising the service -------------------
     let blocked = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<bluer::Address, u64>::new()));
@@ -664,7 +665,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
             }
             let mut dead = Vec::new();
             for (i, writer) in links.writers.iter_mut().enumerate() {
-                match tokio::time::timeout(Duration::from_secs(5), writer.write_all(&bytes)).await {
+                match tokio::time::timeout(Duration::from_secs(5), writer.notify(bytes.clone())).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
                         crate::radio_log!("{} transmit: peripheral write failed: {e}", ts());
