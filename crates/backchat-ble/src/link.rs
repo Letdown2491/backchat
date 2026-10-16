@@ -19,6 +19,9 @@ const MIN_RSSI: i32 = -85;
 /// Stale RPAs from bystander devices rotate on their own; this just stops
 /// us from hammering a dying connection over and over.
 const CONNECT_BACKOFF_MS: u64 = 5 * 60_000;
+/// Max remembered failed addresses (RPA churn from bystander devices is
+/// otherwise unbounded over long runs).
+const MAX_BLOCKED_ADDRESSES: usize = 128;
 
 fn ts() -> String {
     let ms = std::time::SystemTime::now()
@@ -284,7 +287,17 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
-                                    blocked.lock().await.insert(addr, now_ms);
+                                    let mut blocked = blocked.lock().await;
+                                    if !blocked.contains_key(&addr) && blocked.len() >= MAX_BLOCKED_ADDRESSES {
+                                        if let Some(oldest) = blocked
+                                            .iter()
+                                            .min_by_key(|(_, t)| **t)
+                                            .map(|(a, _)| *a)
+                                        {
+                                            blocked.remove(&oldest);
+                                        }
+                                    }
+                                    blocked.insert(addr, now_ms);
                                 }
                                 eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
                                 links.lock().await.remotes.remove(&addr);
@@ -294,11 +307,18 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                         _ => {}
                     }
                 }
+                // A stream that ends immediately (adapter state churn)
+                // must not become a hot loop.
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     };
 
     // ---- Outbound pump: write every frame to every live link ---------------
+    // Peripheral writes carry a timeout: a stalled subscriber must not hold
+    // the links mutex (and with it discovery and every other transmit)
+    // forever. Writers that fail or stall are removed; BlueZ re-subscribes
+    // as a fresh writer if the peer actually wants notifications.
     let task = tokio::spawn(async move {
         let mut outbound_rx = outbound_rx;
         while let Some(bytes) = outbound_rx.recv().await {
@@ -307,10 +327,22 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 "{} transmit: {} bytes → {} peripheral subscriber(s), {} central link(s)",
                 ts(), bytes.len(), links.writers.len(), links.remotes.len()
             );
-            for writer in &mut links.writers {
-                if let Err(e) = writer.write_all(&bytes).await {
-                    eprintln!("{} transmit: peripheral write failed: {e}", ts());
+            let mut dead = Vec::new();
+            for (i, writer) in links.writers.iter_mut().enumerate() {
+                match tokio::time::timeout(Duration::from_secs(5), writer.write_all(&bytes)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("{} transmit: peripheral write failed: {e}", ts());
+                        dead.push(i);
+                    }
+                    Err(_) => {
+                        eprintln!("{} transmit: peripheral write stalled >5s: dropping subscriber", ts());
+                        dead.push(i);
+                    }
                 }
+            }
+            for i in dead.into_iter().rev() {
+                links.writers.remove(i);
             }
             for remote in links.remotes.values() {
                 if let Err(e) = remote.try_send(bytes.clone()) {

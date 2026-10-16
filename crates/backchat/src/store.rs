@@ -49,13 +49,21 @@ struct Peer {
     last_seen: i64,
 }
 
-/// One geohash's observed activity during a discovery scan.
+/// Conversation lines kept per peer; older lines are trimmed.
+const MAX_DM_HISTORY: usize = 500;
+
+/// One geohash's observed activity during a discovery scan. The
+/// distinct-sender set is capped: past the cap, `people` undercounts
+/// rather than the table growing without bound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ScanCell {
     msgs: u32,
     senders: HashSet<String>,
     last: i64,
 }
+
+/// Max tracked distinct senders per scanned cell.
+const SCAN_SENDERS_CAP: usize = 128;
 
 /// Public shape of a scan row for the browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,8 +394,7 @@ impl ChatStore {
                 });
             }
             MeshEvent::PrivateMessage { sender_id, nickname, content, .. } => {
-                let viewed = self.dms.entry(sender_id).or_default();
-                viewed.push(DmLine {
+                self.push_dm(sender_id, DmLine {
                     sender: nickname.clone(),
                     content,
                     ours: false,
@@ -509,7 +516,7 @@ impl ChatStore {
                 .find(|r| r.peer_id == peer_id)
                 .map(|r| r.nickname)
                 .unwrap_or_else(|| hex::encode(&peer_id[..2]));
-            self.dms.entry(peer_id).or_default().push(DmLine {
+            self.push_dm(peer_id, DmLine {
                 sender: String::new(),
                 content: format!("not delivered: {nick} is out of range"),
                 ours: false,
@@ -523,7 +530,7 @@ impl ChatStore {
             content: content.to_string(),
         });
         let sender = self.nickname_or_id();
-        self.dms.entry(peer_id).or_default().push(DmLine {
+        self.push_dm(peer_id, DmLine {
             sender,
             content: content.to_string(),
             ours: true,
@@ -618,6 +625,17 @@ impl ChatStore {
     }
 
     /// One remembered visit (newest first, capped at 8).
+    /// Append to a peer's conversation, oldest-capped. DM history is
+    /// otherwise unbounded over the life of the app.
+    fn push_dm(&mut self, peer: [u8; 8], line: DmLine) {
+        let history = self.dms.entry(peer).or_default();
+        history.push(line);
+        if history.len() > MAX_DM_HISTORY {
+            let excess = history.len() - MAX_DM_HISTORY;
+            history.drain(..excess);
+        }
+    }
+
     fn note_channel_visit(&mut self, gh: &str) {
         self.settings.channels.retain(|m| m.geohash != gh);
         self.settings.channels.insert(
@@ -635,7 +653,9 @@ impl ChatStore {
     fn note_scan(&mut self, gh: &str, pubkey: &str, created_at: i64) {
         let cell = self.scan.entry(gh.to_string()).or_default();
         cell.msgs += 1;
-        cell.senders.insert(pubkey.to_string());
+        if cell.senders.len() < SCAN_SENDERS_CAP {
+            cell.senders.insert(pubkey.to_string());
+        }
         cell.last = cell.last.max(created_at);
         // Keep the table bounded on a busy network.
         if self.scan.len() > 200 {
@@ -918,6 +938,25 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert!(history[0].notice);
         assert!(history[0].content.contains("out of range"));
+    }
+
+    #[test]
+    fn dm_history_is_capped_per_peer() {
+        let (mesh_tx, _mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
+        let peer = [9u8; 8];
+        store.on_mesh_event(MeshEvent::PeerSeen {
+            peer_id: peer,
+            nickname: "phone".into(),
+            is_new: true,
+        });
+        for i in 0..600 {
+            store.send_dm_to(peer, &format!("msg {i}"));
+        }
+        assert_eq!(store.dm_history(&peer).len(), 500);
+        // The newest survived the trim.
+        assert_eq!(store.dm_history(&peer).last().unwrap().content, "msg 599");
     }
 
     #[test]

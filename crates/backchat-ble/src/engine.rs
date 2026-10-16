@@ -34,6 +34,13 @@ pub const ANNOUNCE_THROTTLE_MS: u64 = 10_000;
 /// neighbor-only sync packets, `seenPacketCapacity` = 500).
 pub const SYNC_TTL_HOPS: u8 = 0;
 pub const SYNC_MESSAGE_CAP: usize = 500;
+/// Max half-open handshakes. A msg1 creates responder state for an
+/// unauthenticated sender id, so this must be bounded against floods.
+pub const MAX_PENDING_HANDSHAKES: usize = 32;
+/// Half-open handshakes older than this are abandoned.
+pub const PENDING_HANDSHAKE_EXPIRY_MS: u64 = 30_000;
+/// Queued DMs waiting for a handshake, total across peers.
+pub const OUTBOX_CAP: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Engine I/O surface
@@ -95,7 +102,8 @@ pub struct Engine {
     nickname: String,
     registry: HashMap<[u8; 8], PeerInfo>,
     sessions: HashMap<[u8; 8], NoiseSession>,
-    pending_handshakes: HashMap<[u8; 8], PendingHandshake>,
+    pending_handshakes: HashMap<[u8; 8], (PendingHandshake, u64)>,
+    pending_order: VecDeque<[u8; 8]>,
     dedup: DedupCache,
     fragments: FragmentAssembler,
     outbox: VecDeque<PendingPrivate>,
@@ -115,6 +123,7 @@ impl Engine {
             registry: HashMap::new(),
             sessions: HashMap::new(),
             pending_handshakes: HashMap::new(),
+            pending_order: VecDeque::new(),
             dedup: DedupCache::default(),
             fragments: FragmentAssembler::default(),
             outbox: VecDeque::new(),
@@ -144,6 +153,21 @@ impl Engine {
         self.sessions.contains_key(peer)
     }
 
+    /// Introspection: is a handshake half-open for this peer?
+    pub fn has_pending(&self, peer: &[u8; 8]) -> bool {
+        self.pending_handshakes.contains_key(peer)
+    }
+
+    /// Introspection: half-open handshake count (cap-bounded).
+    pub fn pending_count(&self) -> usize {
+        self.pending_handshakes.len()
+    }
+
+    /// Introspection: DMs queued behind handshakes (cap-bounded).
+    pub fn outbox_len(&self) -> usize {
+        self.outbox.len()
+    }
+
     // -----------------------------------------------------------------
     // Inbound
     // -----------------------------------------------------------------
@@ -156,7 +180,8 @@ impl Engine {
         self.on_packet(packet, false, now_ms)
     }
 
-    fn on_packet(&mut self, packet: Packet, reassembled: bool, now_ms: u64) -> Vec<Action> {
+    /// Public for tests and probes; raw bytes go through [`Engine::on_bytes`].
+    pub fn on_packet(&mut self, packet: Packet, reassembled: bool, now_ms: u64) -> Vec<Action> {
         let sender_id = PeerId::from_mesh_bytes(&packet.sender_id)
             .mesh_bytes()
             .expect("8-byte id");
@@ -310,8 +335,7 @@ impl Engine {
                 let mut responder = HandshakeResponder::new(self.identity.noise.clone());
                 match responder.step2(payload) {
                     Ok(msg2) => {
-                        self.pending_handshakes
-                            .insert(sender_id, PendingHandshake::Responding(responder));
+                        self.insert_pending(sender_id, PendingHandshake::Responding(responder), now_ms);
                         let mut reply = Packet::new(
                             MessageType::NoiseHandshake,
                             self.peer_id(),
@@ -329,8 +353,7 @@ impl Engine {
             }
             // msg2: we are the initiator.
             96 => {
-                if let Some(PendingHandshake::Initiating(initiator)) =
-                    self.pending_handshakes.remove(&sender_id)
+                if let Some(PendingHandshake::Initiating(initiator)) = self.take_pending(&sender_id)
                 {
                     if let Ok((msg3, completed)) = initiator.step3(payload) {
                         self.establish(sender_id, completed, actions);
@@ -351,8 +374,7 @@ impl Engine {
             }
             // msg3: we were the responder.
             64 => {
-                if let Some(PendingHandshake::Responding(responder)) =
-                    self.pending_handshakes.remove(&sender_id)
+                if let Some(PendingHandshake::Responding(responder)) = self.take_pending(&sender_id)
                 {
                     if let Ok(completed) = responder.step4(payload) {
                         // The initiator's static arrives inside msg3: the
@@ -512,6 +534,9 @@ impl Engine {
             // Tell the UI the message is queued behind a handshake, not lost.
             actions.push(Action::Event(MeshEvent::DmPending { peer_id: peer }));
         }
+        if self.outbox.len() >= OUTBOX_CAP {
+            self.outbox.pop_front(); // drop the oldest queued DM
+        }
         self.outbox.push_back(PendingPrivate { peer, content: content.to_string(), message_id });
         actions
     }
@@ -540,7 +565,23 @@ impl Engine {
         for peer in expired {
             self.registry.remove(&peer);
             self.sync_announces.remove(&peer);
+            // A session for a peer that's been gone three minutes is
+            // dead weight (its cipher state would otherwise live
+            // forever); the next DM re-handshakes like upstream.
+            self.sessions.remove(&peer);
+            self.take_pending(&peer);
             actions.push(Action::Event(MeshEvent::PeerExpired { peer_id: peer }));
+        }
+        // Half-open handshakes that never completed: bounded, but don't
+        // keep the crypto state around past the window either.
+        let stale: Vec<[u8; 8]> = self
+            .pending_handshakes
+            .iter()
+            .filter(|(_, (_, started))| now_ms.saturating_sub(*started) > PENDING_HANDSHAKE_EXPIRY_MS)
+            .map(|(k, _)| *k)
+            .collect();
+        for peer in stale {
+            self.take_pending(&peer);
         }
         actions
     }
@@ -549,10 +590,29 @@ impl Engine {
     // Internals
     // -----------------------------------------------------------------
 
+    fn insert_pending(&mut self, peer: [u8; 8], pending: PendingHandshake, now_ms: u64) {
+        if !self.pending_handshakes.contains_key(&peer) {
+            self.pending_order.push_back(peer);
+        }
+        // Bounded: evict the oldest half-open handshake at the cap.
+        while self.pending_order.len() > MAX_PENDING_HANDSHAKES {
+            if let Some(evicted) = self.pending_order.pop_front() {
+                self.pending_handshakes.remove(&evicted);
+            }
+        }
+        self.pending_handshakes.insert(peer, (pending, now_ms));
+    }
+
+    fn take_pending(&mut self, peer: &[u8; 8]) -> Option<PendingHandshake> {
+        let pending = self.pending_handshakes.remove(peer)?.0;
+        self.pending_order.retain(|p| p != peer);
+        Some(pending)
+    }
+
     fn initiate_handshake(&mut self, peer: [u8; 8], now_ms: u64) -> Option<Action> {
         let mut initiator = HandshakeInitiator::new(self.identity.noise.clone());
         let msg1 = initiator.step1().ok()?;
-        self.pending_handshakes.insert(peer, PendingHandshake::Initiating(initiator));
+        self.insert_pending(peer, PendingHandshake::Initiating(initiator), now_ms);
         let mut packet = Packet::new(
             MessageType::NoiseHandshake,
             self.peer_id(),

@@ -312,3 +312,82 @@ fn request_sync_gets_stored_packets_back() {
         .any(|p| p.kind == backchat_core::message_type::MessageType::Message as u8
             && p.payload == b"sync me"));
 }
+#[test]
+fn a_msg1_flood_cannot_grow_pending_handshakes_without_bound() {
+    use backchat_core::message_type::MessageType;
+    use backchat_core::noise_session::HandshakeInitiator;
+    use backchat_core::packet::Packet;
+
+    let mut engine = Engine::new(MeshIdentity::generate(), "sim".into());
+    let now = now();
+    // 200 real (well-formed) msg1 packets from distinct fresh identities:
+    // each one creates responder state, which must be capped.
+    for i in 0..200u64 {
+        let identity = MeshIdentity::generate();
+        let peer = identity.peer_id().mesh_bytes().unwrap();
+        let mut initiator = HandshakeInitiator::new(identity.noise.clone());
+        let msg1 = initiator.step1().unwrap();
+        let mut packet = Packet::new(MessageType::NoiseHandshake, peer, now + i, msg1, 7);
+        packet.recipient_id = Some(engine.peer_id());
+        let _ = engine.on_packet(packet, false, now + i);
+    }
+    assert!(
+        engine.pending_count() <= backchat_ble::engine::MAX_PENDING_HANDSHAKES,
+        "pending: {}",
+        engine.pending_count()
+    );
+}
+
+#[test]
+fn sessions_and_halfopen_handshakes_expire_with_their_peer() {
+    let mut a = Sim::new();
+    let mut b = Sim::new();
+
+    a.announce();
+    deliver(&mut a, &mut b);
+    deliver(&mut b, &mut a);
+    a.drain();
+    let b_id = b.peer_id();
+
+    // Establish real sessions via the lazy handshake.
+    for action in a.engine.send_private(b_id, "hi", now()) {
+        a.take(action);
+    }
+    deliver(&mut a, &mut b);
+    deliver(&mut b, &mut a);
+    deliver(&mut a, &mut b);
+    assert!(a.engine.session_established(&b_id));
+
+    // b goes silent past the peer expiry: the tick reaps the registry
+    // entry, the session, and any half-open handshake with it.
+    let actions = a.engine.tick(now() + 181_000);
+    assert!(actions
+        .iter()
+        .any(|act| matches!(act, Action::Event(MeshEvent::PeerExpired { .. }))));
+    assert!(!a.engine.session_established(&b_id));
+    assert!(!a.engine.has_pending(&b_id));
+}
+
+#[test]
+fn the_dm_outbox_is_bounded() {
+    let mut a = Sim::new();
+    let mut b = Sim::new();
+
+    a.announce();
+    deliver(&mut a, &mut b);
+    deliver(&mut b, &mut a);
+    a.drain();
+    let b_id = b.peer_id();
+
+    // No session and no handshake yet: every DM queues behind msg1.
+    for i in 0..200 {
+        for action in a.engine.send_private(b_id, &format!("dm {i}"), now() + i) {
+            a.take(action);
+        }
+    }
+    assert!(
+        a.engine.outbox_len() <= backchat_ble::engine::OUTBOX_CAP,
+        "outbox: {}",
+        a.engine.outbox_len()
+    );
+}
