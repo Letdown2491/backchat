@@ -17,6 +17,17 @@ cd "$(dirname "$0")/.."
 # the EXTERNAL auth uid matches the socket credentials (SO_PEERCRED); as
 # container root we present uid 0 while the host sees uid 1000 → the bus
 # rejects every call ("NoReply"). keep-id makes the uids agree.
+# Pass diagnostic env vars only when actually set: an empty -e assignment
+# is indistinguishable from unset inside the container and made the
+# peripheral-only switch fire on plain runs.
+EXTRA_ENV=()
+if [[ -n "${BACKCHAT_DEBUG:-}" ]]; then
+  EXTRA_ENV+=(-e "BACKCHAT_DEBUG=$BACKCHAT_DEBUG")
+fi
+if [[ -n "${BACKCHAT_NO_CENTRAL:-}" ]]; then
+  EXTRA_ENV+=(-e "BACKCHAT_NO_CENTRAL=$BACKCHAT_NO_CENTRAL")
+fi
+
 exec podman run --rm -i --userns=keep-id \
   -v "$PWD":/work -w /work \
   -e PATH=/usr/local/cargo/bin:/usr/bin:/bin \
@@ -27,8 +38,7 @@ exec podman run --rm -i --userns=keep-id \
   -v /usr/share/fonts:/usr/share/fonts:ro \
   -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
   -e XDG_DATA_HOME=/work/.data \
-  -e BACKCHAT_DEBUG="${BACKCHAT_DEBUG:-}" \
-  -e BACKCHAT_NO_CENTRAL="${BACKCHAT_NO_CENTRAL:-}" \
+  "${EXTRA_ENV[@]}" \
   -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
   localhost/bitchat-dev-rust \
   ./target/debug/backchat

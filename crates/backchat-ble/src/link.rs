@@ -119,11 +119,14 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
 
     let service_uuid = config.network.service_uuid();
 
-    // Diagnostic: BACKCHAT_NO_CENTRAL=1 runs peripheral-only (advertise +
-    // GATT, never connect out). The phone connects to our advertisement;
-    // this isolates whether our own central attempts (which BlueZ aborts
-    // with le-connection-abort-by-local) are suppressing it.
-    let central_enabled = std::env::var_os("BACKCHAT_NO_CENTRAL").is_none();
+    // Diagnostic: BACKCHAT_NO_CENTRAL=1 (non-empty) runs peripheral-only
+    // (advertise + GATT, never connect out). The phone connects to our
+    // advertisement; this isolates whether our own central attempts are
+    // suppressing it. Empty or unset means both roles, matching the
+    // non-empty convention of BACKCHAT_DEBUG.
+    let central_enabled = !std::env::var("BACKCHAT_NO_CENTRAL")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
     if !central_enabled {
         eprintln!("{} link: central role disabled (BACKCHAT_NO_CENTRAL): peripheral only", ts());
     }
