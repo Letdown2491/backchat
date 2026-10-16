@@ -762,8 +762,9 @@ async fn run_remote(
             // advertisement down.
             resolved_misses += 1;
             if resolved_misses >= 4 {
+                let peer_name = device.name().await.ok().flatten().unwrap_or_default();
                 eprintln!(
-                    "{} remote {}: peer resolved {} services but none serves the mesh: releasing the link",
+                    "{} remote {}: peer ({peer_name:?}) resolved {} services but none serves the mesh: releasing the link",
                     ts(), device.address(), services.len()
                 );
                 let _ = tokio::time::timeout(Duration::from_secs(5), device.disconnect()).await;
