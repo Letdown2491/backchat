@@ -22,6 +22,15 @@ pub enum ChatLine {
     Message { sender: String, content: String, ours: bool, timestamp: i64 },
 }
 
+/// One line of a private conversation with a mesh peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmLine {
+    pub sender: String,
+    pub content: String,
+    pub ours: bool,
+    pub timestamp: i64,
+}
+
 struct Peer {
     nickname: Option<String>,
     last_seen: i64,
@@ -44,6 +53,8 @@ pub struct ChatStore {
     pub mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
     /// mesh peer id → (nickname, last_seen secs).
     mesh_peers: HashMap<[u8; 8], (String, i64)>,
+    /// Private conversation history per mesh peer, newest last.
+    dms: HashMap<[u8; 8], Vec<DmLine>>,
 }
 
 impl ChatStore {
@@ -66,6 +77,7 @@ impl ChatStore {
             relay_tx,
             mesh_tx,
             mesh_peers: HashMap::new(),
+            dms: HashMap::new(),
         }
     }
 
@@ -238,12 +250,18 @@ impl ChatStore {
                 });
                 self.trim();
             }
-            MeshEvent::PrivateMessage { nickname, content, .. } => {
-                self.lines.push(ChatLine::Message {
-                    sender: format!("{nickname} (dm)"),
+            MeshEvent::PrivateMessage { sender_id, nickname, content, .. } => {
+                let viewed = self.dms.entry(sender_id).or_default();
+                viewed.push(DmLine {
+                    sender: nickname.clone(),
                     content,
                     ours: false,
                     timestamp: now_secs(),
+                });
+                // Keep a pointer in the main log too — the DM pane is
+                // opt-in, so arriving DMs must announce themselves.
+                self.lines.push(ChatLine::System {
+                    text: format!("{nickname} sent you a private message — /dm {nickname} to read & reply"),
                 });
                 self.trim();
             }
@@ -258,27 +276,53 @@ impl ChatStore {
 
     /// Direct message a mesh peer by nickname.
     pub fn send_mesh_dm(&mut self, nick: &str, content: &str) {
+        match self.resolve_peer(nick) {
+            Some((peer_id, _)) => self.send_dm_to(peer_id, content),
+            None => self.system_line(format!("no mesh peer named {nick} — /peers")),
+        }
+    }
+
+    /// Resolve a nickname to a live mesh peer.
+    pub fn resolve_peer(&self, nick: &str) -> Option<([u8; 8], String)> {
+        self.mesh_peers
+            .iter()
+            .find(|(_, (n, _))| n.eq_ignore_ascii_case(nick))
+            .map(|(k, (n, _))| (*k, n.clone()))
+    }
+
+    /// Open a private conversation with a peer by nickname. Returns the
+    /// peer for the view to focus.
+    pub fn open_dm(&mut self, nick: &str) -> Option<([u8; 8], String)> {
+        let (peer_id, name) = self.resolve_peer(nick)?;
+        self.system_line(format!("private chat with {name} — /back returns to the mesh log"));
+        Some((peer_id, name))
+    }
+
+    /// DM history with a peer (newest last).
+    pub fn dm_history(&self, peer: &[u8; 8]) -> &[DmLine] {
+        self.dms.get(peer).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Send a DM to a resolved peer and echo it into the conversation.
+    pub fn send_dm_to(&mut self, peer_id: [u8; 8], content: &str) {
+        if content.trim().is_empty() {
+            return;
+        }
         let Some(mesh_tx) = &self.mesh_tx else {
             self.system_line("mesh is not running (bluetooth unavailable?)");
             return;
         };
-        let Some((peer_id, _)) = self
-            .mesh_peers
-            .iter()
-            .find(|(_, (n, _))| n.eq_ignore_ascii_case(nick))
-            .map(|(k, v)| (*k, v))
-        else {
-            self.system_line(format!("no mesh peer named {nick} — /peers"));
-            return;
-        };
-        let _ = mesh_tx.try_send(MeshCommand::SendPrivate { peer: peer_id, content: content.to_string() });
-        self.lines.push(ChatLine::Message {
-            sender: format!("{} (dm→)", self.nickname_or_id()),
+        let _ = mesh_tx.try_send(MeshCommand::SendPrivate {
+            peer: peer_id,
+            content: content.to_string(),
+        });
+        let sender = self.nickname_or_id();
+        self.dms.entry(peer_id).or_default().push(DmLine {
+            sender,
             content: content.to_string(),
             ours: true,
             timestamp: now_secs(),
         });
-        self.trim();
     }
 
     pub fn mesh_peer_count(&self, now: i64) -> usize {
@@ -392,6 +436,51 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, None);
         offline.send_message("hello");
         assert!(matches!(offline.lines.last(), Some(ChatLine::System { .. })));
+    }
+
+    #[test]
+    fn dms_have_a_per_peer_history_and_resolvable_targets() {
+        let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
+        let peer = [9u8; 8];
+        store.on_mesh_event(MeshEvent::PeerSeen {
+            peer_id: peer,
+            nickname: "phone".into(),
+            is_new: true,
+        });
+
+        // Open, send, receive: the conversation lives per peer, not in the
+        // main log.
+        assert_eq!(store.open_dm("PHONE").map(|(p, _)| p), Some(peer));
+        store.send_dm_to(peer, "hello private");
+        store.on_mesh_event(MeshEvent::PrivateMessage {
+            sender_id: peer,
+            nickname: "phone".into(),
+            content: "hello back".into(),
+            message_id: "m1".into(),
+        });
+        let history = store.dm_history(&peer);
+        assert_eq!(history.len(), 2);
+        assert!((history[0].ours, !history[1].ours) == (true, true));
+        assert!(store.dm_history(&[1u8; 8]).is_empty());
+
+        // The DM went out over the mesh, and the main log only carries a
+        // pointer to the conversation, not the content.
+        match mesh_rx.try_recv().expect("mesh command") {
+            MeshCommand::SendPrivate { peer: p, content } => {
+                assert_eq!((p, content.as_str()), (peer, "hello private"));
+            }
+            other => panic!("expected SendPrivate, got {other:?}"),
+        }
+        assert!(store.lines.iter().any(|l| matches!(
+            l,
+            ChatLine::System { text } if text.contains("/dm phone")
+        )));
+        assert!(!store.lines.iter().any(|l| matches!(
+            l,
+            ChatLine::Message { content, .. } if content == "hello private"
+        )));
     }
 
     #[test]

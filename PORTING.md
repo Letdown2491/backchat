@@ -102,8 +102,16 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 | `BLEService.swift` (dual role) | peripheral advertise + GATT write-without-response/notify AND central scan/connect on one adapter | `ble::link` (bluer) |
 
 Deliberate v1 deviations (documented in `ble::link`): all outbound frames
-flood every link (no per-peer link tables); fanout subsetting, TTL clamps,
-and gossip sync are not ported yet.
+flood every link (no per-peer link tables); fanout subsetting and TTL
+clamps are not ported yet. Gossip sync IS ported (responder side:
+`ble::engine::on_request_sync` keeps the latest accepted announce per
+peer plus a 500-packet broadcast-message ring, answers REQUEST_SYNC
+with those at TTL 0, directed routing only — we don't parse the
+requester's GCS filter, dedup makes the extra sends harmless).
+
+Upstream's adaptive relay probability (PacketRelayManager, kicks in
+above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported — always
+relay below that scale.
 
 ### Mesh semantics (behavioral, no fixed bytes — but interop-relevant)
 

@@ -25,6 +25,9 @@ pub struct ChatView {
     /// item heights and clipped message bodies; virtualized list flakes too).
     log_scroll: ScrollHandle,
     last_line_count: usize,
+    /// Open private conversation (peer id, nickname) — the pane shows this
+    /// peer's DM history and plain input goes to them; `/back` returns.
+    active_dm: Option<([u8; 8], String)>,
 }
 
 impl ChatView {
@@ -82,13 +85,14 @@ impl ChatView {
         }
 
         let input = cx.new(|cx| {
-            TextInput::focused("", "message — or /join <geohash>, /nick <name>, /help", cx)
+            TextInput::focused("", "message — or /join <geohash>, /dm <nick>, /peers, /help", cx)
         });
         Self {
             store,
             input,
             log_scroll: ScrollHandle::new(),
             last_line_count: 0,
+            active_dm: None,
         }
     }
 
@@ -113,6 +117,14 @@ impl ChatView {
                             _ => store.system_line("usage: /msg <nick> <text>"),
                         }
                     }
+                    (Some("dm"), Some(nick)) => {
+                        let nick = nick.trim();
+                        match store.open_dm(nick) {
+                            Some(peer) => self.active_dm = Some(peer),
+                            None => store.system_line(format!("no mesh peer named {nick} — /peers")),
+                        }
+                    }
+                    (Some("back"), _) => self.active_dm = None,
                     (Some("peers"), _) => {
                         let now = crate::store::now_secs();
                         let names = store.mesh_peer_names(now);
@@ -124,18 +136,22 @@ impl ChatView {
                     }
                     (Some("help"), _) => {
                         store.system_line(
-                            "commands: /join <geohash> · /nick <name> · /msg <nick> <text> · /peers · /help",
+                            "commands: /join <geohash> · /nick <name> · /msg <nick> <text> · /dm <nick> · /back · /peers · /help",
                         );
                     }
                     (Some("join"), None) => store.system_line("usage: /join <geohash>"),
                     (Some("nick"), None) => store.system_line("usage: /nick <name>"),
                     (Some("msg"), None) => store.system_line("usage: /msg <nick> <text>"),
+                    (Some("dm"), None) => store.system_line("usage: /dm <nick>"),
                     (Some(other), _) => {
                         store.system_line(format!("unknown command /{other} — /help"))
                     }
                     (None, _) => {}
                 }
             });
+        } else if let Some((peer, _)) = self.active_dm {
+            // In a DM pane, plain input is a private message.
+            self.store.update(cx, |store, _| store.send_dm_to(peer, &text));
         } else {
             self.store.update(cx, |store, _| store.send_message(&text));
         }
@@ -162,13 +178,19 @@ impl Render for ChatView {
         });
         let lines: Vec<ChatLine> = self.store.update(cx, |store, _| store.lines.clone());
         let line_count = lines.len();
-        if line_count != self.last_line_count {
+        let show_dms = self.active_dm.clone();
+        let dm_lines: Vec<crate::store::DmLine> = match &show_dms {
+            Some((peer, _)) => self.store.update(cx, |store, _| store.dm_history(peer).to_vec()),
+            None => vec![],
+        };
+        let display_count = if show_dms.is_some() { dm_lines.len() } else { line_count };
+        if display_count != self.last_line_count {
             // Follow the tail: minimally reveal the newest line each frame
             // the log grows.
-            if line_count > 0 {
-                self.log_scroll.scroll_to_item(line_count - 1);
+            if display_count > 0 {
+                self.log_scroll.scroll_to_item(display_count - 1);
             }
-            self.last_line_count = line_count;
+            self.last_line_count = display_count;
         }
 
         div()
@@ -198,9 +220,10 @@ impl Render for ChatView {
                                 div()
                                     .text_color(rgb(ACCENT))
                                     .font_weight(FontWeight::BOLD)
-                                    .child(match &channel {
-                                        Some(g) => format!("#{g}"),
-                                        None => "bitchat-rs".to_string(),
+                                    .child(match (&channel, &show_dms) {
+                                        (_, Some((_, nick))) => format!("\u{1f512} {nick}"),
+                                        (Some(g), _) => format!("#{g}"),
+                                        (None, _) => "bitchat-rs".to_string(),
                                     }),
                             )
                             .child(
@@ -241,7 +264,58 @@ impl Render for ChatView {
                     .track_scroll(&self.log_scroll)
                     .flex()
                     .flex_col()
-                    .children(lines.iter().map(|line| match line {
+                    .children(if let Some((_, nick)) = &show_dms {
+                        // Private conversation pane: the peer's DM history.
+                        let mut kids: Vec<_> = dm_lines
+                            .iter()
+                            .map(|dm| {
+                                let bg = if dm.ours { BG_MINE } else { BG };
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .mr_2()
+                                    .bg(rgb(bg))
+                                    .rounded(px(6.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_2()
+                                            .items_baseline()
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(ACCENT))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(dm.sender.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(FG_DIM))
+                                                    .child(format_time(dm.timestamp)),
+                                            ),
+                                    )
+                                    .child(div().text_size(px(14.)).child(dm.content.clone()))
+                                    .into_any_element()
+                            })
+                            .collect();
+                        if kids.is_empty() {
+                            kids.push(
+                                div()
+                                    .px_3()
+                                    .text_size(px(12.))
+                                    .italic()
+                                    .text_color(rgb(FG_DIM))
+                                    .child(format!(
+                                        "private chat with {nick} — messages are end-to-end encrypted (noise). /back returns to the mesh log"
+                                    ))
+                                    .into_any_element(),
+                            );
+                        }
+                        kids
+                    } else {
+                        lines.iter().map(|line| match line {
                         ChatLine::System { text } => div()
                             .px_3()
                             .text_size(px(12.))
@@ -282,7 +356,8 @@ impl Render for ChatView {
                                 )
                                 .into_any_element()
                         }
-                    })),
+                        }).collect::<Vec<_>>()
+                    }),
             )
             // Input row
             .child(
