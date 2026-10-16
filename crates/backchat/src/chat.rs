@@ -1093,6 +1093,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
     match line {
         ChatLine::System { text } => Some(
             div()
+                .w_full()
                 .flex()
                 .justify_center()
                 .py_0p5()
@@ -1106,7 +1107,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                 .into_any_element(),
         ),
         ChatLine::Message { sender, content, ours, timestamp } => {
-            let mut row = div().flex().flex_col();
+            let mut row = div().w_full().flex().flex_col();
             if *timestamp > 0 {
                 let day = timestamp / 86_400;
                 let prev_day = lines[..ix].iter().rev().find_map(|l| match l {
@@ -1118,6 +1119,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                 if prev_day != Some(day) {
                     row = row.child(
                         div()
+                            .w_full()
                             .flex()
                             .justify_center()
                             .py_2()
@@ -1134,6 +1136,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
             if *ours {
                 row = row.child(
                     div()
+                        .w_full()
                         .flex()
                         .justify_end()
                         .px_5()
@@ -1163,6 +1166,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
             } else {
                 row = row.child(
                     div()
+                        .w_full()
                         .flex()
                         .justify_start()
                         .px_5()
