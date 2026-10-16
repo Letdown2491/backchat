@@ -11,6 +11,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Concurrent central links cap (upstream `MAX_CONNECTIONS_NORMAL`).
+const MAX_CENTRAL_LINKS: usize = 8;
+/// Skip peers weaker than this (upstream BALANCED power profile).
+const MIN_RSSI: i32 = -85;
+/// Don't reconnect to an address whose link ended in failure for this long.
+/// Stale RPAs from bystander devices rotate on their own; this just stops
+/// us from hammering a dying connection over and over.
+const CONNECT_BACKOFF_MS: u64 = 5 * 60_000;
+
 fn ts() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -174,9 +183,11 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     }
 
     // ---- Central: scan for peers advertising the service -------------------
+    let blocked = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<bluer::Address, u64>::new()));
     let discovery = {
         let links = links.clone();
         let inbound_tx = inbound_tx.clone();
+        let blocked = blocked.clone();
         let wedge_failures = wedge_failures.clone();
         let own_address = adapter.address().await.unwrap_or_default();
         tokio::spawn(async move {
@@ -197,9 +208,36 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 while let Some(event) = events.next().await {
                     match event {
                         AdapterEvent::DeviceAdded(addr) => {
-                            if own_address == addr || links.lock().await.remotes.contains_key(&addr) {
+                            if own_address == addr {
                                 continue;
                             }
+                            // Connection scheduler (ported from upstream's
+                            // BluetoothGattClientManager + PowerManager):
+                            // cap concurrent links, gate weak signals, and
+                            // back off addresses that failed permanently so
+                            // one dying device can't hold the serialized
+                            // connect slot forever.
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            {
+                                let mut blocked = blocked.lock().await;
+                                if let Some(&failed_at) = blocked.get(&addr) {
+                                    if now_ms.saturating_sub(failed_at) < CONNECT_BACKOFF_MS {
+                                        continue;
+                                    }
+                                    blocked.remove(&addr);
+                                }
+                            }
+                            let link_table = links.lock().await;
+                            if link_table.remotes.contains_key(&addr) {
+                                continue;
+                            }
+                            if link_table.remotes.len() >= MAX_CENTRAL_LINKS {
+                                continue;
+                            }
+                            drop(link_table);
                             let links = links.clone();
                             let device = match adapter.device(addr) {
                                 Ok(device) => device,
@@ -209,13 +247,24 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                             if !uuids.contains(&service_uuid) {
                                 continue;
                             }
+                            // Upstream's BALANCED power profile threshold.
+                            if let Ok(Some(rssi)) = device.rssi().await {
+                                if rssi < MIN_RSSI as i16 {
+                                    eprintln!(
+                                        "{} discovery: peer at {} too weak ({rssi} dBm < {MIN_RSSI}) — skipping",
+                                        ts(), addr
+                                    );
+                                    continue;
+                                }
+                            }
                             eprintln!(
                                 "{} discovery: bitchat peer at {} (name {:?}) — connecting as central",
                                 ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
                             );
                             let inbound = inbound_tx.clone();
                             let connect_lock = connect_lock.clone();
-                                            let wedge_failures = wedge_failures.clone();
+                            let wedge_failures = wedge_failures.clone();
+                            let blocked = blocked.clone();
                             let (remote_tx, remote_rx) = mpsc::channel::<Vec<u8>>(64);
                             links.lock().await.remotes.insert(addr, remote_tx.clone());
                             tokio::spawn(async move {
@@ -229,6 +278,14 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     &wedge_failures,
                                 )
                                 .await;
+                                if result.is_err() {
+                                    // Record the failure time for the backoff.
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0);
+                                    blocked.lock().await.insert(addr, now_ms);
+                                }
                                 eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
                                 links.lock().await.remotes.remove(&addr);
                             });
