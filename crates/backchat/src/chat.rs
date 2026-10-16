@@ -307,7 +307,9 @@ impl Render for ChatView {
             // switched spaces / left the browser; never yank someone reading
             // history. Offsets are from the last paint, before the splice.
             let count = lines.len();
-            let at_bottom = self.log_list.scroll_px_offset_for_scrollbar().y
+            // Scroll offsets run negative going down; max_offset is the
+            // positive content-minus-viewport distance.
+            let at_bottom = -self.log_list.scroll_px_offset_for_scrollbar().y
                 >= self.log_list.max_offset_for_scrollbar().height - px(2.0);
             let switched = self.last_space != space || self.last_browsing != browsing;
             let grew = count != self.last_count;
@@ -599,13 +601,17 @@ impl Render for ChatView {
                             None => {
                                 let lines = Rc::new(lines);
                                 let hue = space.hue();
-                                div().flex_1().min_h_0().py_3().child(list(
-                                    self.log_list.clone(),
-                                    move |ix, _window, _cx| {
-                                        chat_row(&lines, ix, hue)
-                                            .unwrap_or_else(|| div().into_any_element())
-                                    },
-                                ))
+                                // The list must size itself: it draws its
+                                // items in prepaint, so it contributes no
+                                // layout height of its own. As a flex child
+                                // with flex_1 it fills the log area.
+                                list(self.log_list.clone(), move |ix, _window, _cx| {
+                                    chat_row(&lines, ix, hue)
+                                        .unwrap_or_else(|| div().into_any_element())
+                                })
+                                .flex_1()
+                                .min_h_0()
+                                .py_3()
                                 .into_any_element()
                             }
                         }
