@@ -94,8 +94,9 @@ pub struct LinkHandle {
     pub task: tokio::task::JoinHandle<()>,
     /// The discovery task.
     pub discovery: tokio::task::JoinHandle<()>,
-    /// Live advertisement: dropping it stops advertising.
-    _adv: bluer::adv::AdvertisementHandle,
+    /// The advertisement watchdog: owns the live advertisement and
+    /// re-registers it whenever bluetoothd drops the instance.
+    _adv_watchdog: tokio::task::JoinHandle<()>,
     /// Live GATT application: dropping it unregisters the server.
     _gatt: bluer::gatt::local::ApplicationHandle,
 }
@@ -187,14 +188,60 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
     // ---- Peripheral: advertisement + local GATT ----------------------------
-    let advertisement = Advertisement {
-        advertisement_type: AdvType::Peripheral,
-        service_uuids: [service_uuid].into_iter().collect(),
-        discoverable: Some(true),
-        local_name: Some(config.nickname.clone()),
-        ..Default::default()
+    // Advertisement ownership lives in the watchdog task. bluer registers
+    // once and never observes bluetoothd's Release(): if bluetoothd drops
+    // the instance (churn from earlier processes, controller state), the
+    // advertisement dies silently while our handle still looks alive, and
+    // no peer can ever find us again. bluetoothd publishes its count of
+    // active instances on the adapter, so poll it and re-register on zero.
+    let adv_nickname = config.nickname.clone();
+    let adv_watchdog = {
+        let adapter = adapter.clone();
+        tokio::spawn(async move {
+            loop {
+                let advertisement = Advertisement {
+                    advertisement_type: AdvType::Peripheral,
+                    service_uuids: [service_uuid].into_iter().collect(),
+                    discoverable: Some(true),
+                    local_name: Some(adv_nickname.clone()),
+                    ..Default::default()
+                };
+                let handle = match adapter.advertise(advertisement).await {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        eprintln!(
+                            "{} peripheral: advertisement registration failed ({e}): retrying in 5s",
+                            ts()
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+                eprintln!("{} peripheral: advertising as {:?}", ts(), adv_nickname);
+                // Hold the handle until bluetoothd reports no active
+                // instances: two consecutive zero readings, so a mid-flight
+                // registration does not look like a release.
+                let mut zeros = 0;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    match adapter.active_advertising_instances().await {
+                        Ok(0) => zeros += 1,
+                        Ok(_) => zeros = 0,
+                        Err(_) => {} // transient D-Bus hiccup: keep holding
+                    }
+                    if zeros >= 2 {
+                        eprintln!(
+                            "{} peripheral: advertisement vanished (bluetoothd released the instance): re-registering",
+                            ts()
+                        );
+                        break;
+                    }
+                }
+                // Dropping the handle unregisters the stale registration.
+                drop(handle);
+            }
+        })
     };
-    let adv_handle = adapter.advertise(advertisement).await?;
 
     let (char_control, char_control_handle) = characteristic_control();
     // Inbound packets arrive as characteristic writes from centrals. The
@@ -615,7 +662,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         wedge_failures,
         task,
         discovery,
-        _adv: adv_handle,
+        _adv_watchdog: adv_watchdog,
         _gatt: app_handle,
     })
 }
