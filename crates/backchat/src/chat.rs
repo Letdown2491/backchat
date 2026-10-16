@@ -887,8 +887,8 @@ fn rel_time(secs: i64) -> String {
 }
 
 impl ChatView {
-    /// The active space's conversation: day-separated rows with per-space
-    /// styling (mine right-aligned bubbles, theirs clean lines) and designed
+    /// The active space's conversation: day-separated rows with messenger
+    /// alignment (mine right-aligned bubbles, theirs left) and designed
     /// empty states.
     /// The empty-state intro: a centered glyph with a small message under
     /// it. Returns None when the log has rows for the virtualized list.
@@ -1163,13 +1163,20 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
             } else {
                 row = row.child(
                     div()
+                        .flex()
+                        .justify_start()
                         .px_5()
-                        .py_1()
+                        .py_0p5()
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap_0p5()
+                                .max_w(px(420.))
+                                .px_3()
+                                .py_1p5()
+                                .rounded(px(12.))
+                                .bg(rgb(SURFACE))
                                 .child(
                                     div()
                                         .flex()
