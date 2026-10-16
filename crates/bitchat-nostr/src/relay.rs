@@ -30,14 +30,21 @@ pub enum RelayCommand {
     Subscribe(Vec<Subscription>),
     /// Publish a signed event to every connected relay.
     Publish(NostrEvent),
+    /// Tear down current sessions and connect to a new relay set (used
+    /// when the joined channel's nearest relays change).
+    SetRelays(Vec<String>),
+    /// Internal: close this session (the manager aborts on SetRelays too;
+    /// this is the cooperative path).
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
 pub enum RelayEvent {
     /// An EVENT received (relay url, event).
     Received { relay: String, event: NostrEvent },
-    /// Connectivity changes for the status banner.
-    Status { connected: usize },
+    /// Connectivity changes (a session connected or dropped); delta-summed
+    /// for the status banner.
+    Status { delta: i32 },
 }
 
 static SUB_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -94,22 +101,42 @@ async fn run_manager(
 ) {
     // One command channel per relay session; the loop below fans commands
     // out to all of them.
-    let mut sessions: Vec<mpsc::UnboundedSender<RelayCommand>> = Vec::new();
+    let mut sessions: Vec<(mpsc::UnboundedSender<RelayCommand>, tokio::task::JoinHandle<()>)> =
+        Vec::new();
     for relay in relays {
-        let (relay_cmd_tx, relay_cmd_rx) = mpsc::unbounded_channel::<RelayCommand>();
-        let evt_tx = evt_tx.clone();
-        let url = relay.clone();
-        tokio::spawn(async move {
-            relay_session(url, relay_cmd_rx, evt_tx).await;
-        });
-        sessions.push(relay_cmd_tx);
+        spawn_session(&mut sessions, relay, evt_tx.clone());
     }
 
     while let Some(cmd) = cmd_rx.recv().await {
-        for session in &sessions {
-            let _ = session.send(cmd.clone());
+        match cmd {
+            RelayCommand::SetRelays(urls) => {
+                for (tx, handle) in sessions.drain(..) {
+                    let _ = tx.send(RelayCommand::Shutdown);
+                    handle.abort();
+                }
+                for url in urls {
+                    spawn_session(&mut sessions, url, evt_tx.clone());
+                }
+            }
+            other => {
+                for (tx, _) in &sessions {
+                    let _ = tx.send(other.clone());
+                }
+            }
         }
     }
+}
+
+fn spawn_session(
+    sessions: &mut Vec<(mpsc::UnboundedSender<RelayCommand>, tokio::task::JoinHandle<()>)>,
+    relay: String,
+    evt_tx: mpsc::UnboundedSender<RelayEvent>,
+) {
+    let (relay_cmd_tx, relay_cmd_rx) = mpsc::unbounded_channel::<RelayCommand>();
+    let handle = tokio::spawn(async move {
+        relay_session(relay, relay_cmd_rx, evt_tx).await;
+    });
+    sessions.push((relay_cmd_tx, handle));
 }
 
 async fn relay_session(
@@ -118,12 +145,24 @@ async fn relay_session(
     evt_tx: mpsc::UnboundedSender<RelayEvent>,
 ) {
     let mut backoff = std::time::Duration::from_secs(1);
+    // Snapshot of the current subscription set, re-sent on every
+    // (re)connect so a dropped session resumes its REQs.
+    let mut current_subs: Vec<Subscription> = Vec::new();
     'session: loop {
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
-                let _ = evt_tx.send(RelayEvent::Status { connected: 1 });
+                eprintln!("[relay] connected: {url}");
+                let _ = evt_tx.send(RelayEvent::Status { delta: 1 });
                 backoff = std::time::Duration::from_secs(1);
                 let (mut write, mut read) = ws.split();
+
+                // Adopt the current subscription set.
+                for sub in &current_subs {
+                    let req = serde_json::json!(["REQ", sub.id, sub.filter]);
+                    if write.send(WsMessage::Text(req.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
 
                 loop {
                     tokio::select! {
@@ -142,13 +181,18 @@ async fn relay_session(
                         }
                         cmd = cmd_rx.recv() => {
                             match cmd {
+                                Some(RelayCommand::Shutdown) => return,
                                 Some(RelayCommand::Subscribe(subs)) => {
-                                    for sub in subs {
+                                    current_subs = subs;
+                                    for sub in &current_subs {
                                         let req = serde_json::json!(["REQ", sub.id, sub.filter]);
                                         if write.send(WsMessage::Text(req.to_string().into())).await.is_err() {
                                             break 'session;
                                         }
                                     }
+                                }
+                                Some(RelayCommand::SetRelays(_)) => {
+                                    // Managed by the manager, not sessions.
                                 }
                                 Some(RelayCommand::Publish(event)) => {
                                     let msg = serde_json::json!(["EVENT", event]);
@@ -162,9 +206,9 @@ async fn relay_session(
                     }
                 }
             }
-            Err(_) => {}
+            Err(e) => eprintln!("[relay] connect failed: {url}: {e}"),
         }
-        let _ = evt_tx.send(RelayEvent::Status { connected: 0 });
+        let _ = evt_tx.send(RelayEvent::Status { delta: -1 });
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }

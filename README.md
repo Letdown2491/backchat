@@ -23,8 +23,33 @@ and which Swift files define wire behavior.
 
 ## Status
 
-M0 scaffold. See [PORTING.md](PORTING.md) for the milestone list and the
-upstream tracking procedure.
+**M1 working: Nostr transport.** You can join geohash channels and chat
+drop-in with real bitchat iOS/Android clients over the internet.
+
+Verified so far:
+- private envelopes (kind 13/14/1059) decrypt real Android- and iOS-emitted
+  fixtures (`crates/bitchat-nostr/tests/envelope_fixtures.rs`)
+- live publish/subscribe round-trip against `bitchat.nostr1.com`
+  (`crates/bitchat-nostr/tests/probe_live.rs`, network test, `--ignored`)
+- BLE mesh (M2) is stubbed; see [PORTING.md](PORTING.md).
+
+## Running
+
+No compiler on the host — everything runs in the pinned Fedora 43 container:
+
+```sh
+podman build -t localhost/bitchat-dev-rust -f containers/bitchat-dev-rust.containerfile .
+./scripts/run.sh
+```
+
+A window opens. `/join <geohash>` picks the 5 relays nearest that cell (from
+upstream's GPS relay directory) and announces you; `/nick <name>` sets your
+display name; `/help` lists commands. State lives in
+`~/.local/state/bitchat-rs/` — the device seed rotates every geohash
+identity, same unlinkability model as upstream.
+
+Tests: `./scripts/build.sh test` (42 tests, all offline; one network probe
+behind `--ignored`).
 
 ## License
 

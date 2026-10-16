@@ -1,16 +1,25 @@
 [package]
 name = "bitchat-app"
-description = "The GPUI client."
+description = "bitchat-rs desktop client: geohash channels over Nostr, GPUI shell."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "bitchat"
+path = "src/main.rs"
+
 [dependencies]
 bitchat-core = { path = "../bitchat-core" }
 bitchat-nostr = { path = "../bitchat-nostr" }
-bitchat-ble = { path = "../bitchat-ble" }
+gpui.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+unicode-segmentation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand = "0.9"
 
-# gpui is pre-1.0 and pinned deliberately; bumps are a task, not a drive-by.
-# Uncomment with the M0 window:
-# gpui = "*"
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

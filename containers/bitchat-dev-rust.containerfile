@@ -8,7 +8,18 @@
 # pkg-config so those builds find their libraries.
 FROM fedora:43
 
+# Rust toolchain baked into the image: CARGO_HOME/RUSTUP_HOME live in image
+# layers (not volumes), so the image is self-contained; only target/ is
+# shared with the host checkout.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/bin:/bin
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+
 RUN dnf -y install gcc pkgconf-pkg-config fontconfig-devel freetype-devel \
       libxkbcommon-devel libxkbcommon-x11-devel clang-devel \
       flatpak python3 \
+      # Vulkan loader + lavapipe (software rendering) so gpui can run in
+      # the container without GPU device passthrough.
+      mesa-vulkan-drivers vulkan-loader \
   && dnf clean all

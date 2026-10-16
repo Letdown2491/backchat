@@ -21,6 +21,7 @@ pub mod identity;
 pub mod pow;
 #[cfg(feature = "relay")]
 pub mod relay;
+pub mod relay_geo;
 
 pub use event::NostrEvent;
 pub use identity::Identity;
