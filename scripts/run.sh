@@ -13,7 +13,11 @@ cd "$(dirname "$0")/.."
 # and SELinux labeling off so the socket is connectable.
 # BLE mesh: BlueZ talks over the system D-Bus socket; the mesh identity
 # (Noise + signing keys) persists in .data so restarts keep the same peer ID.
-exec podman run --rm -i \
+# --userns=keep-id is REQUIRED for the D-Bus auth: dbus-broker checks that
+# the EXTERNAL auth uid matches the socket credentials (SO_PEERCRED); as
+# container root we present uid 0 while the host sees uid 1000 → the bus
+# rejects every call ("NoReply"). keep-id makes the uids agree.
+exec podman run --rm -i --userns=keep-id \
   -v "$PWD":/work -w /work \
   -e PATH=/usr/local/cargo/bin:/usr/bin:/bin \
   --security-opt label=disable \
