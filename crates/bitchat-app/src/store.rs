@@ -130,33 +130,40 @@ impl ChatStore {
         let _ = crate::persistence::save_settings(&self.settings);
     }
 
-    /// Send a public message to the current channel.
+    /// Send a public message: geohash channel (if joined) and BLE mesh
+    /// (if up) are independent transports; either alone suffices.
     pub fn send_message(&mut self, content: &str) {
-        let Some(geohash_str) = self.geohash.clone() else {
-            self.system_line("not in a channel — use /join <geohash> first");
-            return;
-        };
         if content.trim().is_empty() {
             return;
         }
-        let persona = self.persona.as_ref().expect("persona exists after join");
-        let event = geohash::create_ephemeral_geohash_event(
-            content,
-            &geohash_str,
-            persona,
-            Some(&self.settings.nickname),
-            false,
-        );
+        let mesh_up = self.mesh_tx.is_some();
+        let geohash_str = self.geohash.clone();
+        if geohash_str.is_none() && !mesh_up {
+            self.system_line("nowhere to send — /join <geohash>, or wait for the BLE mesh to find a peer");
+            return;
+        }
+        if let Some(geohash_str) = geohash_str {
+            let persona = self.persona.as_ref().expect("persona exists after join");
+            let event = geohash::create_ephemeral_geohash_event(
+                content,
+                &geohash_str,
+                persona,
+                Some(&self.settings.nickname),
+                false,
+            );
+            let _ = self.relay_tx.send(RelayCommand::Publish(event));
+        }
+        // Local echo once, regardless of which transports carried it.
         self.lines.push(ChatLine::Message {
             sender: self.nickname_or_id(),
             content: content.to_string(),
             ours: true,
-            timestamp: event.created_at,
+            timestamp: now_secs(),
         });
         self.trim();
-        let _ = self.relay_tx.send(RelayCommand::Publish(event));
-        // Mesh is bridged: the same text also floods over BLE.
-        self.send_mesh_public(content);
+        if mesh_up {
+            self.send_mesh_public(content);
+        }
     }
 
     fn send_presence(&self) {
@@ -324,10 +331,9 @@ impl ChatStore {
 
     pub fn nickname_or_id(&self) -> String {
         if self.settings.nickname.is_empty() {
-            self.persona
-                .as_ref()
-                .map(|p| format!("anon-{}", &p.public_key_hex()[..8]))
-                .unwrap_or_else(|| "anon".into())
+            // Same derivation as the mesh announce nickname (main.rs) so
+            // the phone's mesh list, our display, and /msg targets agree.
+            format!("anon-{}", hex::encode(&self.device_seed[..2]))
         } else {
             self.settings.nickname.clone()
         }
@@ -361,6 +367,31 @@ mod tests {
         let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), _tx, None);
         store.join("dr5rs");
         store
+    }
+
+    #[test]
+    fn mesh_sends_work_without_joining_a_channel() {
+        let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
+        store.send_message("over the mesh");
+        // Echoed locally and dispatched to the mesh node — no geohash needed.
+        match store.lines.last() {
+            Some(ChatLine::Message { content, ours, .. }) => {
+                assert_eq!(content, "over the mesh");
+                assert!(ours);
+            }
+            other => panic!("expected local echo, got {other:?}"),
+        }
+        match mesh_rx.try_recv().expect("mesh command") {
+            MeshCommand::SendPublic(text) => assert_eq!(text, "over the mesh"),
+            other => panic!("expected SendPublic, got {other:?}"),
+        }
+        // With no mesh and no channel, the user gets guidance instead of silence.
+        let mut offline = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, None);
+        offline.send_message("hello");
+        assert!(matches!(offline.lines.last(), Some(ChatLine::System { .. })));
     }
 
     #[test]

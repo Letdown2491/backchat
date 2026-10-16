@@ -44,8 +44,10 @@ fn main() {
 
     // BLE mesh node: needs BlueZ on the system bus; degrades to None when
     // bluetooth is unavailable (container, no adapter, …).
+    // Same derivation as the store's display name, so the nickname the
+    // phone sees in its mesh list matches what we type and /msg-able.
     let mesh_nickname = if settings.nickname.is_empty() {
-        "anon".to_string()
+        format!("anon-{}", hex::encode(&device_seed[..2]))
     } else {
         settings.nickname.clone()
     };
