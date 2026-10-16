@@ -3,19 +3,35 @@
 //! Upstream sources of truth (see PORTING.md):
 //! - `NostrEmbeddedBitChat.swift` — `bitchat1:` base64url embedding of whole
 //!   packets (noiseEncrypted, ttl 7; random unlinkable sender IDs for
-//!   geohash DMs)
-//! - whitepaper §5.3 — private envelope: unsigned inner message (kind 14)
-//!   inside a sender-signed seal (kind 13), inside a public envelope
-//!   (kind 1059) signed by a one-time key. Content fields are `v2:` +
-//!   base64url(24 B nonce ‖ XChaCha20-Poly1305 ct ‖ 16 B tag); keys from
-//!   secp256k1 ECDH + HKDF-SHA256 reusing the "nip44-v2" info label.
-//!   NOT NIP-17/NIP-44/NIP-59 compatible.
-//! - `NostrIdentity.swift` / `NostrIdentityBridge.swift` — secp256k1
-//!   identities, per-geohash ephemeral personas
-//! - `NostrRelayManager.swift` / `GeoRelayDirectory.swift` — relay set,
-//!   subscriptions, 24 h lookback
+//!   geohash DMs) → [`embedded`]
+//! - `NostrProtocol.swift` — the private-envelope scheme (kind 13/14/1059,
+//!   `v2:` + XChaCha20-Poly1305 over secp256k1 ECDH + HKDF-SHA256 with the
+//!   historical "nip44-v2" info label; NOT NIP-17/44/59) → [`envelope`]
+//! - `NostrIdentityBridge.swift` — HMAC-derived per-geohash personas →
+//!   [`geohash::derive_geohash_identity`]
+//! - `NostrPoW.swift` — NIP-13 nonce mining for kind-20000 → [`pow`]
+//! - `NostrRelayManager.swift` / `GeoRelayDirectory.swift` → [`relay`]
 
-// TODO(M1): envelope::seal / envelope::open, embedded::encode_bitchat1 /
-// parse_bitchat1, identity::GeohashIdentity, relay subscriptions.
-// Conformance: XChaCha20Poly1305CompatTests + bitchatTests/Nostr/Fixtures
-// must be ported before any of this is trusted.
+pub mod crypto;
+pub mod embedded;
+pub mod envelope;
+pub mod event;
+pub mod geohash;
+pub mod identity;
+pub mod pow;
+#[cfg(feature = "relay")]
+pub mod relay;
+
+pub use event::NostrEvent;
+pub use identity::Identity;
+
+/// Default relay set (used when the geo relay directory is unavailable).
+/// Upstream ships a GPS-tagged CSV directory (`relays/online_relays_gps.csv`)
+/// and picks relays nearest the geohash; the bundled CSV fallback lives with
+/// the relay client.
+pub const FALLBACK_RELAYS: &[&str] = &[
+    "wss://relay.damus.io",
+    "wss://nos.lol",
+    "wss://relay.primal.net",
+    "wss://nostr.mom",
+];

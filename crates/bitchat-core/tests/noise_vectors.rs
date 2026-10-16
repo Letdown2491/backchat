@@ -14,8 +14,7 @@ fn upstream_noise_vectors_pass() {
 
     assert!(!vectors.is_empty());
     for (vector_i, vector) in vectors.iter().enumerate() {
-        let protocol_name = vector["protocol_name"].as_str().expect("protocol_name");
-        assert_eq!(
+        let protocol_name = vector["protocol_name"].as_str().expect("protocol_name");        assert_eq!(
             protocol_name, PROTOCOL_NAME,
             "upstream changed its Noise profile — update core::noise and PORTING.md"
         );
