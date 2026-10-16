@@ -255,6 +255,17 @@ async fn run_remote(
                     }
                     Err(err) => {
                         eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
+                        // The LE controller accumulates zombie connections when
+                        // clients die mid-connection; scans then return nothing
+                        // and every connect D-Bus-times out. Point the user at
+                        // the host-side reset instead of failing silently.
+                        let msg = err.to_string();
+                        if msg.contains("Timeout") || msg.contains("NotReady") {
+                            eprintln!(
+                                "{} !! adapter looks wedged (D-Bus timeouts / NotReady) —\n     run scripts/ble-reset.sh on the HOST, then restart the app",
+                                ts()
+                            );
+                        }
                         return Err(err);
                     }
                 }
