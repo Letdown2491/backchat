@@ -521,10 +521,10 @@ impl Render for ChatView {
                         rail.child(
                             div()
                                 .px_4()
+                                .pt_1()
                                 .text_size(px(12.))
-                                .italic()
                                 .text_color(rgb(DIM))
-                                .child("nobody yet. peers in bluetooth range appear here"),
+                                .child("No peers in range."),
                         )
                     })
                     .child(div().flex_1())
@@ -884,8 +884,8 @@ impl ChatView {
     /// The active space's conversation: day-separated rows with per-space
     /// styling (mine right-aligned bubbles, theirs clean lines) and designed
     /// empty states.
-    /// The empty-state intro for a space with no real messages yet. Returns
-    /// None when the log has rows for the virtualized list.
+    /// The empty-state intro: a centered glyph with a small message under
+    /// it. Returns None when the log has rows for the virtualized list.
     fn empty_panel(
         &self,
         space: &Space,
@@ -895,64 +895,62 @@ impl ChatView {
         if lines.iter().any(|l| matches!(l, ChatLine::Message { .. })) {
             return None;
         }
-        let empty: Vec<(&str, String, String)> = match space {
-            Space::Nearby => vec![
-                ("\u{25c7}", "mesh".into(), "everyone in bluetooth range, right now".into()),
-                ("", "people appear here automatically as they advertise. on a phone, keep bitchat open with the screen on".into(), String::new()),
-                ("", "say something: it goes to every peer in range, relayed hop by hop".into(), String::new()),
-            ],
+        let (glyph, message, hint): (&str, String, String) = match space {
+            Space::Nearby => (
+                "\u{25c7}",
+                "no one in range yet".into(),
+                "people show up here when their phone is nearby with the app open".into(),
+            ),
             Space::Channel => match &self.store.read(cx).geohash {
-                Some(g) => vec![
-                    ("#", format!("#{g}"), "location-scoped room, carried by relays".into()),
-                    ("", "messages are ephemeral: the last hour only".into(), String::new()),
-                    ("", "your identity here rotates per channel; it's not your mesh name".into(), String::new()),
-                ],
-                None => vec![
-                    ("#", "join a channel".into(), "rooms keyed by geohash".into()),
-                    ("", "/join <geohash>, e.g. /join 9q8yy (San Francisco)".into(), String::new()),
-                    ("", "works with or without the mesh: relays carry it".into(), String::new()),
-                ],
+                Some(g) => (
+                    "#",
+                    format!("#{g} is quiet right now"),
+                    "messages live for the last hour only".into(),
+                ),
+                None => (
+                    "#",
+                    "join a channel".into(),
+                    "/join <geohash>, e.g. /join 9q8yy (San Francisco)".into(),
+                ),
             },
-            Space::Person(_, nick) => vec![
-                ("\u{25c7}", format!("private with {nick}"), "end-to-end encrypted (noise)".into()),
-                ("", "the first message opens the encrypted channel. it may take a second".into(), String::new()),
-                ("", "only you two can read these".into(), String::new()),
-            ],
+            Space::Person(_, nick) => (
+                "\u{25c7}",
+                format!("private with {nick}"),
+                "the first message opens the encrypted channel; it may take a second".into(),
+            ),
         };
-        Some(
-            empty
-                .into_iter()
-                .map(|(glyph, title, hint)| {
+        Some(vec![
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .px_8()
+                .child(
                     div()
-                        .px_5()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(space.hue()))
-                                        .child(if glyph.is_empty() {
-                                            title.clone()
-                                        } else {
-                                            format!("{glyph} {title}")
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(DIM))
-                                        .child(hint.to_string()),
-                                ),
-                        )
-                        .into_any_element()
-                })
-                .collect(),
-        )
+                        .text_size(px(30.))
+                        .text_color(rgb(space.hue()))
+                        .child(glyph),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .max_w(px(380.))
+                        .text_size(px(12.))
+                        .text_center()
+                        .text_color(rgb(DIM))
+                        .child(hint),
+                )
+                .into_any_element(),
+        ])
     }
 
     /// The channel browser: three sections (location ladder, your
