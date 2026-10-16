@@ -15,6 +15,17 @@ pub struct Settings {
     pub geohash: String,
     #[serde(default)]
     pub relays: Vec<String>,
+    /// Recently visited geohash cells for the channel browser's
+    /// "your channels" section, newest first, capped.
+    #[serde(default)]
+    pub channels: Vec<ChannelMemo>,
+}
+
+/// One remembered channel visit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChannelMemo {
+    pub geohash: String,
+    pub last_seen: i64,
 }
 
 pub fn state_dir() -> PathBuf {
@@ -80,6 +91,7 @@ mod tests {
             nickname: "martin".into(),
             geohash: "dr5rs".into(),
             relays: vec!["wss://relay.example".into()],
+            channels: vec![ChannelMemo { geohash: "9q8yy".into(), last_seen: 0 }],
         };
         save_settings(&settings).unwrap();
         assert_eq!(load_settings(), settings);

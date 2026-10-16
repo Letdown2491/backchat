@@ -22,12 +22,24 @@ impl Subscription {
     pub fn new(filter: serde_json::Value) -> Self {
         Self { id: unique_sub_id(), filter }
     }
+
+    /// Override the generated id (used for stable discovery subs).
+    pub fn with_id(mut self, id: &str) -> Self {
+        self.id = id.to_string();
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum RelayCommand {
     /// Replace the subscription set on all relays.
     Subscribe(Vec<Subscription>),
+    /// Toggle the channel-discovery scan: a relay-wide subscription to
+    /// recent geohash traffic (no #g filter), merged with the channel subs
+    /// by the manager and re-sent on reconnects. Managed at the manager
+    /// level so joining/leaving a channel never kills the scan and vice
+    /// versa.
+    Discover(bool),
     /// Publish a signed event to every connected relay.
     Publish(NostrEvent),
     /// Tear down current sessions and connect to a new relay set (used
@@ -55,6 +67,17 @@ fn unique_sub_id() -> String {
 
 /// NIP-01 filter builder for geohash channels: ephemeral messages + presence
 /// tagged `#g`, with a lookback window.
+/// Relay-wide recent geohash traffic: public channel posts (20000) and
+/// presence pings (20001), any cell. Used by the channel browser's
+/// "active right now" section.
+pub fn discovery_subscription() -> Subscription {
+    Subscription::new(serde_json::json!({
+        "kinds": [20000, 20001],
+        "since": now_secs() - 3600,
+    }))
+    .with_id("backchat-discover")
+}
+
 pub fn geohash_filter(geohash: &str, since_secs_ago: i64) -> serde_json::Value {
     let since = now_secs() - since_secs_ago;
     serde_json::json!({
@@ -107,6 +130,19 @@ async fn run_manager(
         spawn_session(&mut sessions, relay, evt_tx.clone());
     }
 
+    // Channel subscriptions plus the optional discovery scan; the union is
+    // what every session actually subscribes to (and resumes after a
+    // reconnect).
+    let mut channel_subs: Vec<Subscription> = Vec::new();
+    let mut discovery = false;
+    let merged = |channel_subs: &Vec<Subscription>, discovery: bool| -> Vec<Subscription> {
+        let mut all = channel_subs.clone();
+        if discovery {
+            all.push(discovery_subscription());
+        }
+        all
+    };
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             RelayCommand::SetRelays(urls) => {
@@ -116,6 +152,20 @@ async fn run_manager(
                 }
                 for url in urls {
                     spawn_session(&mut sessions, url, evt_tx.clone());
+                }
+            }
+            RelayCommand::Subscribe(subs) => {
+                channel_subs = subs;
+                let subs = merged(&channel_subs, discovery);
+                for (tx, _) in &sessions {
+                    let _ = tx.send(RelayCommand::Subscribe(subs.clone()));
+                }
+            }
+            RelayCommand::Discover(on) => {
+                discovery = on;
+                let subs = merged(&channel_subs, discovery);
+                for (tx, _) in &sessions {
+                    let _ = tx.send(RelayCommand::Subscribe(subs.clone()));
                 }
             }
             other => {
@@ -191,8 +241,10 @@ async fn relay_session(
                                         }
                                     }
                                 }
-                                Some(RelayCommand::SetRelays(_)) => {
-                                    // Managed by the manager, not sessions.
+                                Some(RelayCommand::SetRelays(_))
+                                | Some(RelayCommand::Discover(_)) => {
+                                    // Managed by the manager, not sessions
+                                    // (Discover is forwarded as Subscribe).
                                 }
                                 Some(RelayCommand::Publish(event)) => {
                                     let msg = serde_json::json!(["EVENT", event]);

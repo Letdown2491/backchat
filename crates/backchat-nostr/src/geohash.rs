@@ -162,3 +162,89 @@ mod tests {
         assert_eq!(event.id, hex::encode(event.event_hash()));
     }
 }
+
+/// Encode a lat/lon point as a geohash cell of `precision` characters —
+/// the standard interleave algorithm (lon bit first, base32 MSB-first).
+/// Used for the location ladder in the channel browser; joins still accept
+/// any cell string the user types.
+pub fn encode(lat: f64, lon: f64, precision: usize) -> String {
+    const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat_lo, mut lat_hi) = (-90.0f64, 90.0f64);
+    let (mut lon_lo, mut lon_hi) = (-180.0f64, 180.0f64);
+    let bits = [16u8, 8, 4, 2, 1];
+    let mut out = String::with_capacity(precision);
+    let mut bit = 0usize;
+    let mut ch = 0u8;
+    let mut even = true; // lon first, like every geohash implementation
+    while out.len() < precision {
+        let mid;
+        if even {
+            mid = (lon_lo + lon_hi) / 2.0;
+            if lon >= mid {
+                ch |= bits[bit];
+                lon_lo = mid;
+            } else {
+                lon_hi = mid;
+            }
+        } else {
+            mid = (lat_lo + lat_hi) / 2.0;
+            if lat >= mid {
+                ch |= bits[bit];
+                lat_lo = mid;
+            } else {
+                lat_hi = mid;
+            }
+        }
+        even = !even;
+        if bit < 4 {
+            bit += 1;
+        } else {
+            out.push(BASE32[ch as usize] as char);
+            bit = 0;
+            ch = 0;
+        }
+    }
+    out
+}
+
+/// Human label for a cell's zoom level — upstream's
+/// `GeohashChannelLevel` mapping (`levelForLength` in
+/// LocationChannelsSheet.kt).
+pub fn level_name(len: usize) -> &'static str {
+    match len {
+        0..=2 => "region",
+        3..=4 => "province",
+        5 => "city",
+        6 => "neighborhood",
+        7 => "block",
+        _ => "building",
+    }
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+
+    #[test]
+    fn matches_the_reference_vector() {
+        // The worked example on Wikipedia's Geohash page.
+        assert_eq!(encode(42.605, -5.603, 5), "ezs42");
+    }
+
+    #[test]
+    fn prefixes_nest_by_precision() {
+        let full = encode(37.7749, -122.4194, 6);
+        assert!(full.starts_with(&encode(37.7749, -122.4194, 3)));
+        // San Francisco Bay area cells sit under 9q.
+        assert!(full.starts_with("9q"));
+    }
+
+    #[test]
+    fn levels_match_upstreams_mapping() {
+        assert_eq!(level_name(1), "region");
+        assert_eq!(level_name(4), "province");
+        assert_eq!(level_name(5), "city");
+        assert_eq!(level_name(6), "neighborhood");
+        assert_eq!(level_name(7), "block");
+    }
+}

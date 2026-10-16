@@ -16,6 +16,7 @@ pub mod crypto;
 pub mod embedded;
 pub mod envelope;
 pub mod event;
+pub mod geo_ip;
 pub mod geohash;
 pub mod identity;
 pub mod pow;

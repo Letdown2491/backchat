@@ -3,15 +3,16 @@
 //! shell renders from; all networking flows through the relay manager's
 //! command/event channels.
 
-use crate::persistence::Settings;
+use crate::persistence::{ChannelMemo, Settings};
+use backchat_nostr::geo_ip::{fetch_approx_location, GeoFix};
 use backchat_ble::engine::MeshEvent;
 use backchat_ble::node::Command as MeshCommand;
 use backchat_nostr::event::{kinds, NostrEvent};
 use backchat_nostr::geohash;
 use backchat_nostr::identity::Identity;
 use backchat_nostr::relay::{RelayCommand, Subscription};
-use std::collections::HashMap;
-use tokio::sync::mpsc::UnboundedSender;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// One rendered line in a space's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,23 @@ struct Peer {
     last_seen: i64,
 }
 
+/// One geohash's observed activity during a discovery scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ScanCell {
+    msgs: u32,
+    senders: HashSet<String>,
+    last: i64,
+}
+
+/// Public shape of a scan row for the browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanEntry {
+    pub geohash: String,
+    pub msgs: u32,
+    pub people: usize,
+    pub last: i64,
+}
+
 pub struct ChatStore {
     pub device_seed: [u8; 32],
     pub settings: Settings,
@@ -74,6 +92,14 @@ pub struct ChatStore {
     dms: HashMap<[u8; 8], Vec<DmLine>>,
     /// Unread DM count per peer; cleared when the conversation is opened.
     unread: HashMap<[u8; 8], usize>,
+    /// Channel-discovery scan state (see RelayCommand::Discover).
+    scan: HashMap<String, ScanCell>,
+    scanning: bool,
+    /// Coarse location estimate for the browser's ladder (GeoIP, once).
+    geo: Option<GeoFix>,
+    geo_loading: bool,
+    geo_tx: UnboundedSender<Option<GeoFix>>,
+    geo_rx: Option<UnboundedReceiver<Option<GeoFix>>>,
 }
 
 impl ChatStore {
@@ -84,6 +110,7 @@ impl ChatStore {
         relay_tx: UnboundedSender<RelayCommand>,
         mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
     ) -> Self {
+        let (geo_tx, geo_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             device_seed,
             settings,
@@ -100,6 +127,12 @@ impl ChatStore {
             dms: HashMap::new(),
             unread: HashMap::new(),
             mesh_restarting: false,
+            scan: HashMap::new(),
+            scanning: false,
+            geo: None,
+            geo_loading: false,
+            geo_tx,
+            geo_rx: Some(geo_rx),
         }
     }
 
@@ -143,6 +176,8 @@ impl ChatStore {
         self.persona = Some(geohash::derive_geohash_identity(&self.device_seed, &geohash_str));
         self.peers.clear();
         self.log_channel(format!("joined #{geohash_str} — identity rotates per channel"));
+        self.end_browse();
+        self.note_channel_visit(&geohash_str);
 
         // Re-pick the relay set: nearest 5 relays to this cell, exactly as
         // upstream selects them, so peers in the channel are reachable.
@@ -246,6 +281,10 @@ impl ChatStore {
                     return;
                 };
                 if Some(channel.as_str()) != self.geohash.as_deref() {
+                    // Discovery scan: any signed traffic counts.
+                    if self.scanning {
+                        self.note_scan(&channel, &event.pubkey, event.created_at);
+                    }
                     return;
                 }
                 // Ignore echoes of our own events (already echoed locally).
@@ -259,6 +298,9 @@ impl ChatStore {
                     ours: false,
                     timestamp: event.created_at,
                 });
+                if self.scanning {
+                    self.note_scan(&channel, &event.pubkey, event.created_at);
+                }
                 self.trim();
             }
             kinds::GEOHASH_PRESENCE => {
@@ -266,9 +308,15 @@ impl ChatStore {
                     return;
                 };
                 if Some(channel.as_str()) != self.geohash.as_deref() {
+                    if self.scanning {
+                        self.note_scan(&channel, &event.pubkey, event.created_at);
+                    }
                     return;
                 }
                 self.note_peer(&event.pubkey, None, event.created_at);
+                if self.scanning {
+                    self.note_scan(&channel, &event.pubkey, event.created_at);
+                }
             }
             _ => {}
         }
@@ -476,6 +524,129 @@ impl ChatStore {
     /// True when the mesh node exists (bluetooth usable).
     pub fn mesh_is_up(&self) -> bool {
         self.mesh_tx.is_some()
+    }
+
+    // ---- channel browser ------------------------------------------------
+
+    /// Hand the GeoIP receiver to the view pump (once).
+    pub fn take_geo_rx(&mut self) -> Option<UnboundedReceiver<Option<GeoFix>>> {
+        self.geo_rx.take()
+    }
+
+    /// Enter browse mode: start the relay-wide activity scan and, in the
+    /// background, the one-shot coarse location fix.
+    pub fn begin_browse(&mut self) {
+        if !self.scanning {
+            self.scanning = true;
+            let _ = self.relay_tx.send(RelayCommand::Discover(true));
+        }
+        self.start_geo_lookup();
+    }
+
+    /// Leave browse mode: stop the scan (harmless if already off).
+    pub fn end_browse(&mut self) {
+        if self.scanning {
+            self.scanning = false;
+            let _ = self.relay_tx.send(RelayCommand::Discover(false));
+        }
+    }
+
+    /// Kick the one-shot GeoIP fix (blocking fetch on a side thread).
+    fn start_geo_lookup(&mut self) {
+        if self.geo.is_some() || self.geo_loading {
+            return;
+        }
+        self.geo_loading = true;
+        let tx = self.geo_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(fetch_approx_location());
+        });
+    }
+
+    /// Background thread's answer.
+    pub fn set_geo_fix(&mut self, fix: Option<GeoFix>) {
+        self.geo_loading = false;
+        self.geo = fix;
+    }
+
+    /// The location ladder: parent cells of the estimated position, one
+    /// per upstream zoom level (region/province/city/neighborhood), each
+    /// with a human label from the fix.
+    pub fn ladder(&self) -> Vec<(String, &'static str, String)> {
+        let Some(fix) = &self.geo else {
+            return Vec::new();
+        };
+        [(2, fix.country.as_str()), (4, fix.region.as_str()), (5, fix.city.as_str()), (6, "")]
+            .iter()
+            .map(|(len, label)| {
+                let gh = geohash::encode(fix.lat, fix.lon, *len);
+                let label = if label.is_empty() {
+                    format!("near {}", fix.city)
+                } else if label.is_empty() && fix.region.is_empty() {
+                    format!("{}, {}", fix.region, fix.country)
+                } else {
+                    label.to_string()
+                };
+                (gh, geohash::level_name(*len), label)
+            })
+            .collect()
+    }
+
+    pub fn geo_loading(&self) -> bool {
+        self.geo_loading
+    }
+
+    /// One remembered visit (newest first, capped at 8).
+    fn note_channel_visit(&mut self, gh: &str) {
+        self.settings.channels.retain(|m| m.geohash != gh);
+        self.settings.channels.insert(
+            0,
+            ChannelMemo { geohash: gh.to_string(), last_seen: now_secs() },
+        );
+        self.settings.channels.truncate(8);
+    }
+
+    /// History rows for the browser, newest first.
+    pub fn channel_history(&self) -> &[ChannelMemo] {
+        &self.settings.channels
+    }
+
+    fn note_scan(&mut self, gh: &str, pubkey: &str, created_at: i64) {
+        let cell = self.scan.entry(gh.to_string()).or_default();
+        cell.msgs += 1;
+        cell.senders.insert(pubkey.to_string());
+        cell.last = cell.last.max(created_at);
+        // Keep the table bounded on a busy network.
+        if self.scan.len() > 200 {
+            if let Some(oldest) = self
+                .scan
+                .iter()
+                .min_by_key(|(_, c)| c.last)
+                .map(|(k, _)| k.clone())
+            {
+                self.scan.remove(&oldest);
+            }
+        }
+    }
+
+    /// Scan rows for the browser: busiest first.
+    pub fn scan_rows(&self) -> Vec<ScanEntry> {
+        let mut rows: Vec<ScanEntry> = self
+            .scan
+            .iter()
+            .map(|(gh, c)| ScanEntry {
+                geohash: gh.clone(),
+                msgs: c.msgs,
+                people: c.senders.len(),
+                last: c.last,
+            })
+            .collect();
+        rows.sort_by_key(|r| (std::cmp::Reverse(r.msgs), std::cmp::Reverse(r.last)));
+        rows
+    }
+
+    pub fn scanning(&self) -> bool {
+        self.scanning
     }
 
     /// Nickname change propagates to the mesh (re-announce).
@@ -726,6 +897,96 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert!(history[0].notice);
         assert!(history[0].content.contains("out of range"));
+    }
+
+    #[test]
+    fn browse_scans_ranks_and_stops_cleanly() {
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<RelayCommand>();
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), relay_tx, None);
+
+        store.begin_browse();
+        // Discovery toggles the manager-level scan subscription.
+        let mut saw_discover = false;
+        while let Ok(cmd) = relay_rx.try_recv() {
+            if matches!(cmd, RelayCommand::Discover(true)) {
+                saw_discover = true;
+            }
+        }
+        assert!(saw_discover);
+        assert!(store.scanning());
+
+        // Signed traffic from two cells: 9q8yy busier than dr5rs.
+        for (gh, n) in [("dr5rs", 2), ("9q8yy", 3)] {
+            for i in 0..n {
+                store.on_relay_event(geohash::create_ephemeral_geohash_event(
+                    &format!("msg {i}"),
+                    gh,
+                    &Identity::generate(),
+                    None,
+                    false,
+                ));
+            }
+        }
+        let rows = store.scan_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].geohash.as_str(), rows[0].msgs), ("9q8yy", 3));
+        assert_eq!(rows[1].people, 2); // two distinct senders in dr5rs
+
+        // Forged traffic never counts.
+        let mut forged =
+            geohash::create_ephemeral_geohash_event("f", "zz9zz", &Identity::generate(), None, false);
+        forged.sig = Some("0".repeat(128));
+        store.on_relay_event(forged);
+        assert_eq!(store.scan_rows().len(), 2);
+
+        store.end_browse();
+        assert!(!store.scanning());
+        let mut saw_off = false;
+        while let Ok(cmd) = relay_rx.try_recv() {
+            if matches!(cmd, RelayCommand::Discover(false)) {
+                saw_off = true;
+            }
+        }
+        assert!(saw_off);
+    }
+
+    #[test]
+    fn location_ladder_nests_and_labels() {
+        let mut store = store_with_channel();
+        assert!(store.ladder().is_empty());
+        store.set_geo_fix(Some(GeoFix {
+            lat: 42.605,
+            lon: -5.603,
+            city: "Some City".into(),
+            region: "Some Region".into(),
+            country: "Some Country".into(),
+        }));
+        let ladder = store.ladder();
+        assert_eq!(ladder.len(), 4);
+        // Precisions 2/4/5/6, each a prefix of the next, with upstream's
+        // level names.
+        for (i, (gh, level, _)) in ladder.iter().enumerate() {
+            assert_eq!(gh.len(), [2, 4, 5, 6][i]);
+            assert_eq!(*level, geohash::level_name([2, 4, 5, 6][i]));
+            if i > 0 {
+                assert!(gh.starts_with(&ladder[i - 1].0));
+            }
+        }
+        // The city rung is labeled with the city from the fix.
+        assert!(ladder[2].2.contains("Some City"));
+    }
+
+    #[test]
+    fn joins_are_remembered_newest_first() {
+        let mut store = store_with_channel();
+        store.join("dr5rs"); // re-visit bumps it to the front
+        store.join("9q8yy");
+        let names: Vec<&str> = store
+            .channel_history()
+            .iter()
+            .map(|m| m.geohash.as_str())
+            .collect();
+        assert_eq!(names, vec!["9q8yy", "dr5rs"]);
     }
 
     #[test]

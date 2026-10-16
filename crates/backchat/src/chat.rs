@@ -58,6 +58,8 @@ pub struct ChatView {
     space: Space,
     last_count: usize,
     last_space: Space,
+    /// Channel browser open (the `#` space's discovery view).
+    browsing: bool,
 }
 
 impl ChatView {
@@ -70,15 +72,30 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let pump_store = store.downgrade();
+        let mut geo_rx = store.update(cx, |s, _| s.take_geo_rx());
+        let mut geo_done = geo_rx.is_none();
         cx.spawn(async move |this, cx| {
             loop {
-                let Some(event) = relay_rx.recv().await else {
-                    return; // manager gone
-                };
-                let _ = pump_store.update(cx, |store, _| match event {
-                    RelayEvent::Received { event, .. } => store.on_relay_event(event),
-                    RelayEvent::Status { delta } => store.on_status(delta),
-                });
+                tokio::select! {
+                    event = relay_rx.recv() => {
+                        let Some(event) = event else {
+                            return; // manager gone
+                        };
+                        let _ = pump_store.update(cx, |store, _| match event {
+                            RelayEvent::Received { event, .. } => store.on_relay_event(event),
+                            RelayEvent::Status { delta } => store.on_status(delta),
+                        });
+                    }
+                    fix = geo_rx.as_mut().expect("geo_rx present unless done").recv(), if !geo_done => {
+                        match fix {
+                            Some(fix) => {
+                                let _ = pump_store.update(cx, |store, _| store.set_geo_fix(fix));
+                            }
+                            None => {} // fetch failed; retry on next browse
+                        }
+                        geo_done = true; // one-shot either way
+                    }
+                }
                 let _ = this.update(cx, |_, cx| cx.notify());
             }
         })
@@ -135,6 +152,7 @@ impl ChatView {
             space: Space::Nearby,
             last_count: 0,
             last_space: Space::Nearby,
+            browsing: false,
         }
     }
 
@@ -151,6 +169,11 @@ impl ChatView {
             self.store.update(cx, |store, _| {
                 let mut parts = rest.splitn(2, ' ');
                 match (parts.next(), parts.next()) {
+                    (Some("join"), Some(arg)) if arg.trim().is_empty() => {
+                        store.begin_browse();
+                        self.browsing = true;
+                        self.space = Space::Channel;
+                    }
                     (Some("join"), Some(arg)) => store.join(arg),
                     (Some("nick"), Some(arg)) => store.set_nickname(arg),
                     (Some("msg"), Some(rest)) => {
@@ -183,7 +206,11 @@ impl ChatView {
                     (Some("help"), _) => store.system_line(
                         "commands: /join <geohash> · /nick <name> · /dm <nick> · /msg <nick> <text> · /peers · /back",
                     ),
-                    (Some("join"), None) => store.log_channel("usage: /join <geohash>"),
+                    (Some("join"), None) => {
+                        store.begin_browse();
+                        self.browsing = true;
+                        self.space = Space::Channel;
+                    }
                     (Some("nick"), None) => store.log_nearby("usage: /nick <name>"),
                     (Some("msg"), None) => store.log_nearby("usage: /msg <nick> <text>"),
                     (Some("dm"), None) => store.log_nearby("usage: /dm <nick>"),
@@ -231,13 +258,17 @@ impl Render for ChatView {
             });
         let space = self.space.clone();
 
-        // Logs for the active space.
-        let lines: Vec<ChatLine> = match &space {
-            Space::Nearby => self.store.update(cx, |store, _| store.nearby.clone()),
-            Space::Channel => self.store.update(cx, |store, _| store.channel.clone()),
-            Space::Person(peer, _) => self
-                .store
-                .update(cx, |store, _| {
+        // The channel browser replaces the log when open.
+        let browsing = self.browsing && matches!(space, Space::Channel);
+
+        // Logs for the active space (unused while browsing).
+        let lines: Vec<ChatLine> = if browsing {
+            Vec::new()
+        } else {
+            match &space {
+                Space::Nearby => self.store.update(cx, |store, _| store.nearby.clone()),
+                Space::Channel => self.store.update(cx, |store, _| store.channel.clone()),
+                Space::Person(peer, _) => self.store.update(cx, |store, _| {
                     store
                         .dm_history(peer)
                         .iter()
@@ -255,22 +286,30 @@ impl Render for ChatView {
                         })
                         .collect()
                 }),
+            }
         };
 
-        // Follow the tail only when the reader is at the bottom (or just
-        // switched spaces) — never yank someone reading history.
-        let count = lines.len();
-        let at_bottom = self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
-        let switched = self.last_space != space;
-        if count > 0 && (switched || (count != self.last_count && at_bottom)) {
-            self.log_scroll.scroll_to_item(count - 1);
+        if browsing {
+            self.last_count = 0;
+            self.last_space = space.clone();
+        } else {
+            // Follow the tail only when the reader is at the bottom (or just
+            // switched spaces) — never yank someone reading history.
+            let count = lines.len();
+            let at_bottom =
+                self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
+            let switched = self.last_space != space;
+            if count > 0 && (switched || (count != self.last_count && at_bottom)) {
+                self.log_scroll.scroll_to_item(count - 1);
+            }
+            self.last_count = count;
+            self.last_space = space.clone();
         }
-        self.last_count = count;
-        self.last_space = space.clone();
 
         // Contextual composer hint.
         let placeholder: SharedString = match &space {
             Space::Nearby => "message everyone in range — /help for commands".into(),
+            Space::Channel if browsing => "/join <geohash> \u{2014} pick a row above or type one".into(),
             Space::Channel => match &geohash {
                 Some(g) => format!("message #{g}").into(),
                 None => "/join <geohash> to start chatting".into(),
@@ -292,6 +331,15 @@ impl Render for ChatView {
                     format!("{mesh_peers} in range")
                 },
                 MESH,
+            ),
+            Space::Channel if browsing => (
+                "channels".to_string(),
+                if relays > 0 {
+                    format!("discovery on \u{b7} {relays} relays")
+                } else {
+                    "connecting\u{2026}".to_string()
+                },
+                RELAY,
             ),
             Space::Channel => match &geohash {
                 Some(g) => (
@@ -353,6 +401,8 @@ impl Render for ChatView {
                         }),
                         cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.space = Space::Nearby;
+                            this.store.update(cx, |store, _| store.end_browse());
+                            this.browsing = false;
                             cx.notify();
                         }),
                     ))
@@ -370,6 +420,14 @@ impl Render for ChatView {
                         }),
                         cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.space = Space::Channel;
+                            let joined = this.store.read(cx).geohash.is_some();
+                            if joined {
+                                this.browsing = false;
+                                this.store.update(cx, |store, _| store.end_browse());
+                            } else {
+                                this.store.update(cx, |store, _| store.begin_browse());
+                                this.browsing = true;
+                            }
                             cx.notify();
                         }),
                     ))
@@ -444,7 +502,7 @@ impl Render for ChatView {
                                     .child(meta),
                             ),
                     )
-                    // conversation
+                    // conversation (or channel browser)
                     .child(
                         div()
                             .id("log")
@@ -455,7 +513,11 @@ impl Render for ChatView {
                             .flex()
                             .flex_col()
                             .py_3()
-                            .children(self.render_space(&space, lines, cx)),
+                            .children(if browsing {
+                                self.render_browse(cx)
+                            } else {
+                                self.render_space(&space, lines, cx)
+                            }),
                     )
                     // slash menu
                     .when(input_text.starts_with('/') && !input_text.contains(' '), |root| {
@@ -647,6 +709,83 @@ fn person_row(
         .into_any_element()
 }
 
+/// A dim uppercase browser section label.
+fn section_label(text: &str) -> AnyElement {
+    div()
+        .px_5()
+        .pt_4()
+        .pb_1()
+        .text_size(px(10.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(DIM))
+        .child(text.to_string())
+        .into_any_element()
+}
+
+/// A quiet centered browser status line.
+fn status_line(text: impl Into<String>) -> AnyElement {
+    div()
+        .px_5()
+        .py_1()
+        .text_size(px(12.))
+        .italic()
+        .text_color(rgb(DIM))
+        .child(text.into())
+        .into_any_element()
+}
+
+/// One click-to-join row of the channel browser.
+fn browse_row(gh: &str, meta: String, cx: &mut Context<ChatView>) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("join-{gh}")))
+        .mx_3()
+        .px_3()
+        .py_2()
+        .rounded(px(8.))
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap_3()
+        .cursor_pointer()
+        .hover(|r| r.bg(rgb(RAISED)))
+        .on_click({
+            let gh = gh.to_string();
+            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.store.update(cx, |store, _| store.join(&gh));
+                this.browsing = false;
+                cx.notify();
+            })
+        })
+        .child(
+            div()
+                .text_color(rgb(RELAY))
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("#{gh}")),
+        )
+        .child(
+            div()
+                .ml_auto()
+                .text_size(px(11.))
+                .text_color(rgb(DIM))
+                .child(meta),
+        )
+        .into_any_element()
+}
+
+/// Compact relative age: "just now", "4m", "3h", "2d".
+fn rel_time(secs: i64) -> String {
+    if secs < 45 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
 impl ChatView {
     /// The active space's conversation: day-separated rows with per-space
     /// styling (mine right-aligned bubbles, theirs clean lines) and designed
@@ -673,7 +812,7 @@ impl ChatView {
                 ],
                 None => vec![
                     ("#", "join a channel".into(), "rooms keyed by geohash".into()),
-                    ("", "/join <geohash> \u{2014} e.g. /join dr5rs (San Francisco)".into(), String::new()),
+                    ("", "/join <geohash> \u{2014} e.g. /join 9q8yy (San Francisco)".into(), String::new()),
                     ("", "works with or without the mesh: relays carry it".into(), String::new()),
                 ],
             },
@@ -829,6 +968,96 @@ impl ChatView {
         }
     }
     kids
+    }
+
+    /// The channel browser: three sections (location ladder, your
+    /// channels, live activity), every row click-to-join. Typing
+    /// "/join dr5" live-filters the rows to cells starting with dr5.
+    fn render_browse(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let now = crate::store::now_secs();
+        let input = self.input.read(cx).content.to_string();
+        let filter = input
+            .strip_prefix("/join ")
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(str::to_lowercase);
+        let keep = |gh: &str| -> bool {
+            filter.as_deref().is_none_or(|f| gh.starts_with(f))
+        };
+
+        let (geo_loading, scanning) = self
+            .store
+            .update(cx, |store, _| (store.geo_loading(), store.scanning()));
+        let ladder = self.store.read(cx).ladder();
+        let history: Vec<(String, i64)> = self
+            .store
+            .read(cx)
+            .channel_history()
+            .iter()
+            .map(|m| (m.geohash.clone(), m.last_seen))
+            .collect();
+        let scan = self.store.read(cx).scan_rows();
+
+        let ladder: Vec<_> = ladder.into_iter().filter(|(gh, ..)| keep(gh)).collect();
+        let history: Vec<_> = history.into_iter().filter(|(gh, _)| keep(gh)).collect();
+        let scan: Vec<_> = scan.into_iter().filter(|r| keep(&r.geohash)).collect();
+        let nothing_matches =
+            ladder.is_empty() && history.is_empty() && scan.is_empty();
+
+        let mut kids: Vec<AnyElement> = Vec::new();
+
+        if !ladder.is_empty() {
+            kids.push(section_label("FROM YOUR LOCATION (EST.)"));
+            kids.extend(ladder.into_iter().map(|(gh, level, label)| {
+                let meta = if label.is_empty() {
+                    level.to_string()
+                } else {
+                    format!("{level} \u{b7} {label}")
+                };
+                browse_row(&gh, meta, cx)
+            }));
+        } else if geo_loading {
+            kids.push(status_line("estimating your location\u{2026}"));
+        }
+
+        if !history.is_empty() {
+            kids.push(section_label("YOUR CHANNELS"));
+            kids.extend(history.into_iter().map(|(gh, last)| {
+                browse_row(&gh, format!("last visited {}", rel_time(now - last)), cx)
+            }));
+        }
+
+        if !scan.is_empty() {
+            kids.push(section_label("ACTIVE RIGHT NOW"));
+            kids.extend(scan.into_iter().map(|r| {
+                browse_row(
+                    &r.geohash,
+                    format!(
+                        "{} msg \u{b7} {} people \u{b7} {} ago",
+                        r.msgs,
+                        r.people,
+                        rel_time(now - r.last)
+                    ),
+                    cx,
+                )
+            }));
+        } else if scanning && filter.is_none() {
+            kids.push(status_line("listening for active channels\u{2026}"));
+        }
+
+        if nothing_matches {
+            if let Some(f) = &filter {
+                kids.push(status_line(format!(
+                    "no channels match {f} \u{2014} press Enter to join it anyway"
+                )));
+            } else if !geo_loading {
+                kids.push(status_line(
+                    "nothing yet \u{2014} or type /join <geohash> to go anywhere",
+                ));
+            }
+        }
+
+        kids
     }
 }
 
