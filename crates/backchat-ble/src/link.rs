@@ -193,17 +193,25 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
     // ---- Peripheral: advertisement + local GATT ----------------------------
-    // Advertisement ownership lives in the watchdog task. bluer registers
-    // once and never observes bluetoothd's Release(): if bluetoothd drops
-    // the instance (churn from earlier processes, controller state), the
-    // advertisement dies silently while our handle still looks alive, and
-    // no peer can ever find us again. bluetoothd publishes its count of
-    // active instances on the adapter, so poll it and re-register on zero.
+    // Advertisement ownership lives in the watchdog task. Two bluetoothd
+    // behaviors make a fire-and-forget registration useless: a connectable
+    // instance is consumed (disabled) the moment a peer connects to it, and
+    // bluetoothd only re-arms it tens of seconds after the link drops. With
+    // one registration we vanish from the air whenever a peer links up, and
+    // bluer's cached property reads cannot even see it (the old poll never
+    // fired). Re-register on a 30s churn instead: drop and register again,
+    // which always puts a fresh connectable instance on the air whatever
+    // the old one is doing - self-healing after any drop, and while a
+    // peer holds the consumed instance other peers still see us. The
+    // registration attempts double as the bluetoothd heartbeat: failures
+    // and hangs (a dead bluetoothd leaves calls wedged, not erroring) are
+    // bounded, and three in a row flags the session for a full rebuild.
     let adv_nickname = config.nickname.clone();
     let adv_watchdog = {
         let adapter = adapter.clone();
         let dbus_dead = dbus_dead.clone();
         tokio::spawn(async move {
+            let mut failures = 0u32;
             loop {
                 let advertisement = Advertisement {
                     advertisement_type: AdvType::Peripheral,
@@ -215,80 +223,49 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 let handle =
                     match tokio::time::timeout(Duration::from_secs(15), adapter.advertise(advertisement)).await {
                         Ok(Ok(handle)) => handle,
-                        // Registration failure or a hang (a dead bluetoothd
-                        // leaves calls wedged, not erroring): retry either way.
                         Ok(Err(e)) => {
+                            failures += 1;
                             eprintln!(
-                                "{} peripheral: advertisement registration failed ({e}): retrying in 5s",
+                                "{} peripheral: advertisement registration failed ({e}), attempt {failures}",
                                 ts()
                             );
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "{} peripheral: advertisement registration hung >15s: retrying in 5s",
-                                ts()
-                            );
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                    };
-                eprintln!("{} peripheral: advertising as {:?}", ts(), adv_nickname);
-                // Hold the handle until bluetoothd reports no active
-                // instances (two consecutive zero readings, so a mid-flight
-                // registration does not look like a release), or until the
-                // adapter stops answering entirely: bluetoothd crashing or
-                // restarting takes our registrations and our session's
-                // D-Bus connection with it. Poll errors cannot be ridden
-                // out forever, because everything the link does runs
-                // through that one connection: three in a row means the
-                // session is dead and only a full link rebuild (fresh
-                // bluer session) recovers.
-                let mut zeros = 0;
-                let mut errs = 0;
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    // Bound every poll: a dying bluetoothd leaves calls
-                    // wedged rather than erroring, and an unbounded call
-                    // would hang this watchdog forever.
-                    match tokio::time::timeout(
-                        Duration::from_secs(10),
-                        adapter.active_advertising_instances(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(0)) => {
-                            zeros += 1;
-                            errs = 0;
-                        }
-                        Ok(Ok(_)) => {
-                            zeros = 0;
-                            errs = 0;
-                        }
-                        Ok(Err(_)) | Err(_) => {
-                            zeros = 0;
-                            errs += 1;
-                            if errs >= 3 {
+                            if failures >= 3 {
                                 eprintln!(
-                                    "{} peripheral: adapter unreachable over D-Bus (bluetoothd restarted or crashed): flagging the session for a rebuild",
+                                    "{} peripheral: bluetoothd unreachable: flagging the session for a rebuild",
                                     ts()
                                 );
                                 dbus_dead.store(true, std::sync::atomic::Ordering::Relaxed);
                                 return;
                             }
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
                         }
-                    }
-                    if zeros >= 2 {
-                        eprintln!(
-                            "{} peripheral: advertisement vanished (bluetoothd released the instance): re-registering",
-                            ts()
-                        );
-                        break;
-                    }
-                }
-                // Dropping the handle unregisters the stale registration.
+                        Err(_) => {
+                            failures += 1;
+                            eprintln!(
+                                "{} peripheral: advertisement registration hung >15s, attempt {failures}",
+                                ts()
+                            );
+                            if failures >= 3 {
+                                eprintln!(
+                                    "{} peripheral: bluetoothd unreachable: flagging the session for a rebuild",
+                                    ts()
+                                );
+                                dbus_dead.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
+                failures = 0;
+                crate::radio_log!("{} peripheral: advertising as {:?}", ts(), adv_nickname);
+                // Hold for the churn interval, then let the handle drop:
+                // unregistering and re-registering keeps a fresh instance
+                // on the air even while a peer's connection holds the old.
+                tokio::time::sleep(Duration::from_secs(30)).await;
                 drop(handle);
+                crate::radio_log!("{} peripheral: refreshing advertisement", ts());
             }
         })
     };
