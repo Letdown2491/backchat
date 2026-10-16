@@ -28,6 +28,11 @@ pub const PEER_EXPIRY_MS: u64 = 360_000;
 /// Re-announce at most this often when reacting to new peers.
 pub const ANNOUNCE_THROTTLE_MS: u64 = 10_000;
 
+/// Gossip-sync caps (upstream `AppConstants.SYNC_TTL_HOPS` = 0 for
+/// neighbor-only sync packets, `seenPacketCapacity` = 500).
+pub const SYNC_TTL_HOPS: u8 = 0;
+pub const SYNC_MESSAGE_CAP: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Engine I/O surface
 // ---------------------------------------------------------------------------
@@ -86,6 +91,11 @@ pub struct Engine {
     fragments: FragmentAssembler,
     outbox: VecDeque<PendingPrivate>,
     last_announce_ms: u64,
+    /// Gossip-sync store (upstream `GossipSyncManager`): latest accepted
+    /// announce per peer plus a ring of recent broadcast messages, served
+    /// when a neighbor sends REQUEST_SYNC.
+    sync_announces: HashMap<[u8; 8], Packet>,
+    sync_messages: VecDeque<Packet>,
 }
 
 impl Engine {
@@ -100,6 +110,8 @@ impl Engine {
             fragments: FragmentAssembler::default(),
             outbox: VecDeque::new(),
             last_announce_ms: 0,
+            sync_announces: HashMap::new(),
+            sync_messages: VecDeque::new(),
         }
     }
 
@@ -176,7 +188,8 @@ impl Engine {
             k if k == MessageType::NoiseHandshake as u8 => self.on_handshake(&packet, sender_id, now_ms, &mut actions),
             k if k == MessageType::NoiseEncrypted as u8 => self.on_noise_encrypted(&packet, sender_id, &mut actions),
             k if k == MessageType::Fragment as u8 => self.on_fragment(&packet, sender_id, now_ms, &mut actions),
-            _ => {} // courier envelopes, sync, media: not in v1
+            k if k == MessageType::RequestSync as u8 => self.on_request_sync(&packet, sender_id, &mut actions),
+            _ => {} // courier envelopes, media: not in v1
         }
         actions
     }
@@ -207,6 +220,8 @@ impl Engine {
                 last_seen_ms: now_ms,
             },
         );
+        // Keep the validated packet for gossip sync.
+        self.sync_announces.insert(sender_id, packet.clone());
         actions.push(Action::Event(MeshEvent::PeerSeen {
             peer_id: sender_id,
             nickname: announce.nickname,
@@ -220,8 +235,7 @@ impl Engine {
         }
     }
 
-    fn on_public_message(&mut self, packet: &Packet, sender_id: [u8; 8], actions: &mut Vec<Action>) {
-        let Ok(content) = std::str::from_utf8(&packet.payload) else {
+    fn on_public_message(&mut self, packet: &Packet, sender_id: [u8; 8], actions: &mut Vec<Action>) {        let Ok(content) = std::str::from_utf8(&packet.payload) else {
             return;
         };
         if content.is_empty() {
@@ -240,12 +254,37 @@ impl Engine {
                 return;
             }
         }
+        // Keep broadcast messages for gossip sync (upstream keeps only
+        // recipient-less broadcasts).
+        if packet.recipient_id.is_none() {
+            if self.sync_messages.len() >= SYNC_MESSAGE_CAP {
+                self.sync_messages.pop_front();
+            }
+            self.sync_messages.push_back(packet.clone());
+        }
         actions.push(Action::Event(MeshEvent::PublicMessage {
             sender_id,
             nickname,
             content: content.to_string(),
             timestamp: packet.timestamp,
         }));
+    }
+
+    /// Respond to a neighbor's REQUEST_SYNC (upstream
+    /// `GossipSyncManager.handleRequestSync`): re-send our stored public
+    /// packets directed at the requester with neighbor-only TTL. The request
+    /// carries a GCS filter of what they already have; we don't parse it and
+    /// send everything instead — the requester dedups, and sending is
+    /// idempotent. Signatures stay valid because packet signatures exclude
+    /// the TTL field.
+    fn on_request_sync(&mut self, _packet: &Packet, requester: [u8; 8], actions: &mut Vec<Action>) {
+        for stored in self.sync_announces.values().chain(self.sync_messages.iter()) {
+            let mut out = stored.clone();
+            out.ttl = SYNC_TTL_HOPS;
+            if let Ok(encoded) = out.encode(false) {
+                actions.push(Action::SendTo(requester, encoded));
+            }
+        }
     }
 
     fn on_handshake(&mut self, packet: &Packet, sender_id: [u8; 8], now_ms: u64, actions: &mut Vec<Action>) {
@@ -487,6 +526,7 @@ impl Engine {
         let mut actions = Vec::new();
         for peer in expired {
             self.registry.remove(&peer);
+            self.sync_announces.remove(&peer);
             actions.push(Action::Event(MeshEvent::PeerExpired { peer_id: peer }));
         }
         actions

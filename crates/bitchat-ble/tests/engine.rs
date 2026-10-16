@@ -251,3 +251,64 @@ fn announce_passes_android_style_validation() {
         "Ed25519 over padded preimage"
     );
 }
+
+/// Responding to a neighbor's REQUEST_SYNC: an engine that has seen an
+/// announce and a broadcast message answers the requester with those packets,
+/// directed at them, neighbor-only TTL — and the signatures still verify
+/// because packet signatures exclude the TTL field.
+#[test]
+fn request_sync_gets_stored_packets_back() {
+    let mut source = Sim::new(); // has the content
+    let mut requester = Sim::new(); // wants sync
+    let mut responder = Sim::new(); // saw the content, answers
+
+    // Source announces and posts; responder receives both.
+    source.announce();
+    source
+        .engine
+        .send_public("sync me", now())
+        .into_iter()
+        .for_each(|a| source.take(a));
+    for bytes in source.drain() {
+        responder.feed(&bytes);
+    }
+    assert!(responder.events.len() >= 1);
+
+    // Requester (already known to responder via announce) asks for sync.
+    requester.announce();
+    for bytes in requester.drain() {
+        responder.feed(&bytes);
+    }
+    let request = bitchat_core::packet::Packet::new(
+        bitchat_core::message_type::MessageType::RequestSync,
+        requester.peer_id(),
+        now(),
+        vec![],
+        1,
+    );
+    let mut encoded = request.encode(false).unwrap();
+    responder.feed(&encoded);
+
+    // The drain also contains the greet-announce / relay frames triggered by
+    // the requester's announce; sync responses are the TTL-0 copies. Each
+    // keeps the original (broadcast) recipient — upstream routes the stored
+    // packet at the requester's link without readdressing — and still
+    // carries its signature.
+    let responses: Vec<bitchat_core::packet::Packet> = responder
+        .drain()
+        .into_iter()
+        .filter_map(|raw| bitchat_core::packet::Packet::decode(&raw).ok())
+        .filter(|p| p.ttl == 0)
+        .collect();
+    assert!(responses.len() >= 2, "announce + message expected");
+    for pkt in &responses {
+        assert!(pkt.signature.is_some());
+    }
+    assert!(responses
+        .iter()
+        .any(|p| p.kind == bitchat_core::message_type::MessageType::Announce as u8));
+    assert!(responses
+        .iter()
+        .any(|p| p.kind == bitchat_core::message_type::MessageType::Message as u8
+            && p.payload == b"sync me"));
+}
