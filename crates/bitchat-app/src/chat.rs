@@ -282,7 +282,8 @@ impl Render for ChatView {
                                 }
                             },
                         )
-                        .flex_1(),
+                        .w_full()
+                        .h_full(),
                     ),
             )
             // Input row
