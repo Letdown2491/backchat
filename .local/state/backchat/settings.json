@@ -1,0 +1,19 @@
+{
+  "nickname": "",
+  "geohash": "",
+  "relays": [],
+  "channels": [
+    {
+      "geohash": "2222",
+      "last_seen": 1792127737
+    },
+    {
+      "geohash": "9x",
+      "last_seen": 1792127691
+    },
+    {
+      "geohash": "9mubg",
+      "last_seen": 1792127619
+    }
+  ]
+}

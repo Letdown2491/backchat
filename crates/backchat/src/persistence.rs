@@ -1,7 +1,7 @@
 //! On-disk state: device seed (the root of the per-geohash personas) and
 //! user settings. Paths follow XDG: `$XDG_STATE_HOME/backchat/`
 //! (default `~/.local/state/backchat/`). The device seed is 256 bits of
-//! random, persisted once — losing it rotates every geohash identity.
+//! random, persisted once. Losing it rotates every geohash identity.
 
 use rand::RngCore;
 use std::fs;

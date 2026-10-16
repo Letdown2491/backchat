@@ -114,7 +114,7 @@ pub fn geohash_center(geohash: &str) -> Option<(f64, f64)> {
     Some(((lat.0 + lat.1) / 2.0, (lon.0 + lon.1) / 2.0))
 }
 
-/// Haversine distance in km — byte-for-byte the upstream formula.
+/// Haversine distance in km: byte-for-byte the upstream formula.
 pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let r = 6371.0;
     let dlat = (lat2 - lat1) * std::f64::consts::PI / 180.0;
@@ -146,7 +146,7 @@ pub fn closest_relays(entries: &[Entry], geohash: &str, count: usize) -> Vec<Str
 }
 
 /// Load the directory: remote CSV with the bundled snapshot as fallback.
-/// Blocking (up to `FETCH_TIMEOUT_SECS`) — call before entering the UI.
+/// Blocking (up to `FETCH_TIMEOUT_SECS`): call before entering the UI.
 pub fn load_directory() -> Vec<Entry> {
     match fetch_remote() {
         Ok(entries) if !entries.is_empty() => entries,

@@ -39,7 +39,7 @@ pub struct DmLine {
     pub content: String,
     pub ours: bool,
     pub timestamp: i64,
-    /// Status notice (handshake progress), not a message — rendered as an
+    /// Status notice (handshake progress), not a message; rendered as an
     /// unobtrusive inline note.
     pub notice: bool,
 }
@@ -169,13 +169,13 @@ impl ChatStore {
     pub fn join(&mut self, geohash_str: &str) {
         let geohash_str = geohash_str.trim().to_lowercase();
         if geohash_str.is_empty() || geohash_str.len() > 12 {
-            self.system_line("geohash must be 1–12 characters");
+            self.system_line("geohash must be 1 to 12 characters");
             return;
         }
         self.geohash = Some(geohash_str.clone());
         self.persona = Some(geohash::derive_geohash_identity(&self.device_seed, &geohash_str));
         self.peers.clear();
-        self.log_channel(format!("joined #{geohash_str} — identity rotates per channel"));
+        self.log_channel(format!("joined #{geohash_str}. identity rotates per channel"));
         self.end_browse();
         self.note_channel_visit(&geohash_str);
 
@@ -200,7 +200,7 @@ impl ChatStore {
     pub fn set_nickname(&mut self, nickname: &str) {
         let nickname = nickname.trim().to_string();
         if nickname.is_empty() || nickname.len() > 20 {
-            self.system_line("nickname must be 1–20 characters");
+            self.system_line("nickname must be 1 to 20 characters");
             return;
         }
         self.settings.nickname = nickname;
@@ -239,7 +239,7 @@ impl ChatStore {
             return;
         }
         let Some(geohash_str) = self.geohash.clone() else {
-            self.log_channel("not in a channel — /join <geohash> first");
+            self.log_channel("not in a channel. /join <geohash> first");
             return;
         };
         let persona = self.persona.as_ref().expect("persona exists after join");
@@ -359,7 +359,7 @@ impl ChatStore {
             MeshEvent::RadioRestarted { heal } => {
                 self.mesh_restarting = false;
                 self.system_line(if heal {
-                    "bluetooth adapter wedged — power-cycled and restarted the radio"
+                    "bluetooth adapter wedged. power-cycled and restarted the radio"
                 } else {
                     "radio restarted"
                 });
@@ -393,7 +393,7 @@ impl ChatStore {
     pub fn send_mesh_dm(&mut self, nick: &str, content: &str) {
         match self.resolve_peer(nick) {
             Some((peer_id, _)) => self.send_dm_to(peer_id, content),
-            None => self.system_line(format!("no mesh peer named {nick} — /peers")),
+            None => self.system_line(format!("no mesh peer named {nick}. /peers lists who is here")),
         }
     }
 
@@ -406,7 +406,7 @@ impl ChatStore {
     }
 
     /// Open a private conversation with a peer by nickname. Returns the
-    /// peer for the view to focus (silent — the pane title shows the peer).
+    /// peer for the view to focus (silent: the pane title shows the peer).
     pub fn open_dm(&mut self, nick: &str) -> Option<([u8; 8], String)> {
         let (peer_id, name) = self.resolve_peer(nick)?;
         Some((peer_id, name))
@@ -490,7 +490,7 @@ impl ChatStore {
                 .unwrap_or_else(|| hex::encode(&peer_id[..2]));
             self.dms.entry(peer_id).or_default().push(DmLine {
                 sender: String::new(),
-                content: format!("not delivered \u{2014} {nick} is out of range"),
+                content: format!("not delivered: {nick} is out of range"),
                 ours: false,
                 timestamp: now_secs(),
                 notice: true,

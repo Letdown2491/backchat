@@ -1,6 +1,6 @@
 //! The pure mesh packet pipeline: dedup, TTL relay, fragment assembly,
 //! announce registry, Noise sessions, and outbound packet construction.
-//! No I/O — every interaction is bytes in, [`Action`]s out, so the whole
+//! No I/O: every interaction is bytes in, [`Action`]s out, so the whole
 //! mesh behavior is unit-testable without a radio.
 //!
 //! Semantics ported from `BLEService.swift` (processIncomingPacket /
@@ -172,7 +172,7 @@ impl Engine {
         let mut actions = Vec::new();
 
         // Relay before processing (TTL decrement), like upstream relays then
-        // delivers. Packets addressed to us are terminal — never relayed.
+        // delivers. Packets addressed to us are terminal: never relayed.
         // Upstream relays anything with TTL left, including forwarding a
         // TTL-1 packet as TTL-0 (PacketRelayManager: stop only at 0).
         if !reassembled && !addressed_to_us && packet.ttl > 0 {
@@ -285,7 +285,7 @@ impl Engine {
     /// `GossipSyncManager.handleRequestSync`): re-send our stored public
     /// packets directed at the requester with neighbor-only TTL. The request
     /// carries a GCS filter of what they already have; we don't parse it and
-    /// send everything instead — the requester dedups, and sending is
+    /// send everything instead: the requester dedups, and sending is
     /// idempotent. Signatures stay valid because packet signatures exclude
     /// the TTL field.
     fn on_request_sync(&mut self, _packet: &Packet, requester: [u8; 8], actions: &mut Vec<Action>) {
@@ -488,7 +488,7 @@ impl Engine {
     }
 
     /// Send a private message; initiates a Noise handshake first if needed
-    /// (the message is queued and flushed on session establishment —
+    /// (the message is queued and flushed on session establishment;
     /// upstream's lazy-initiation policy).
     pub fn send_private(&mut self, peer: [u8; 8], content: &str, now_ms: u64) -> Vec<Action> {
         let message_id = Self::new_message_id(now_ms);

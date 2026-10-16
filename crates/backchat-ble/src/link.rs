@@ -48,7 +48,7 @@ pub type InboundTx = mpsc::Sender<Vec<u8>>;
 
 /// A running link layer. Holds the live bluer handles (dropping the
 /// advertisement / GATT application handles *stops advertising* and
-/// unregisters the server — they must stay alive for the link's lifetime).
+/// unregisters the server: they must stay alive for the link's lifetime).
 /// Tear down by aborting [`LinkHandle::task`] and [`LinkHandle::discovery`].
 pub struct LinkHandle {
     /// Raw packets received from any radio path.
@@ -62,9 +62,9 @@ pub struct LinkHandle {
     pub task: tokio::task::JoinHandle<()>,
     /// The discovery task.
     pub discovery: tokio::task::JoinHandle<()>,
-    /// Live advertisement — dropping it stops advertising.
+    /// Live advertisement: dropping it stops advertising.
     _adv: bluer::adv::AdvertisementHandle,
-    /// Live GATT application — dropping it unregisters the server.
+    /// Live GATT application: dropping it unregisters the server.
     _gatt: bluer::gatt::local::ApplicationHandle,
 }
 
@@ -79,12 +79,12 @@ pub enum LinkError {
 /// Runs the link layer until the handle's tasks are aborted. When
 /// `heal_power_cycle` is set (respawn after wedge detection), the adapter is
 /// power-cycled first: an HCI reset clears zombie LE connections left behind
-/// when a client died mid-connection — without it the controller stays deaf.
+/// when a client died mid-connection: without it the controller stays deaf.
 pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHandle, LinkError> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
     if heal_power_cycle {
-        eprintln!("{} link: heal — power-cycling adapter", ts());
+        eprintln!("{} link: heal: power-cycling adapter", ts());
         let _ = adapter.set_powered(false).await;
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
@@ -102,7 +102,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         writers: Vec::new(),
         remotes: HashMap::new(),
     }));
-    // BlueZ runs one connection procedure at a time — concurrent Connect
+    // BlueZ runs one connection procedure at a time: concurrent Connect
     // calls fail with "In Progress".
     let connect_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let wedge_failures = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -251,14 +251,14 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                             if let Ok(Some(rssi)) = device.rssi().await {
                                 if rssi < MIN_RSSI as i16 {
                                     eprintln!(
-                                        "{} discovery: peer at {} too weak ({rssi} dBm < {MIN_RSSI}) — skipping",
+                                        "{} discovery: peer at {} too weak ({rssi} dBm < {MIN_RSSI}): skipping",
                                         ts(), addr
                                     );
                                     continue;
                                 }
                             }
                             eprintln!(
-                                "{} discovery: bitchat peer at {} (name {:?}) — connecting as central",
+                                "{} discovery: bitchat peer at {} (name {:?}): connecting as central",
                                 ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
                             );
                             let inbound = inbound_tx.clone();
@@ -379,7 +379,7 @@ async fn run_remote(
     eprintln!("{} remote {}: connected", ts(), device.address());
 
     // Locate the characteristic. Right after connect() the remote GATT db
-    // is sometimes not yet resolved — retry briefly before giving up.
+    // is sometimes not yet resolved: retry briefly before giving up.
     let mut characteristic = None;
     for attempt in 0..10 {
         for service in device.services().await? {
@@ -401,14 +401,14 @@ async fn run_remote(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let Some(characteristic) = characteristic else {
-        eprintln!("{} remote {}: characteristic never appeared — giving up", ts(), device.address());
+        eprintln!("{} remote {}: characteristic never appeared: giving up", ts(), device.address());
         return Ok(());
     };
     eprintln!("{} remote {}: characteristic found", ts(), device.address());
 
     let flags = characteristic.flags().await?;
     eprintln!(
-        "{} remote {}: char flags — write={} write_without_response={} notify={} indicate={}",
+        "{} remote {}: char flags: write={} write_without_response={} notify={} indicate={}",
         ts(), device.address(), flags.write, flags.write_without_response, flags.notify, flags.indicate
     );
 
@@ -442,14 +442,14 @@ async fn run_remote(
             }
             Err(e) => {
                 eprintln!(
-                    "{} remote {}: write IO refused ({e}) — falling back to write-with-response",
+                    "{} remote {}: write IO refused ({e}): falling back to write-with-response",
                     ts(), device.address()
                 );
                 Outbound::Direct
             }
         }
     } else {
-        eprintln!("{} remote {}: char has no write-without-response — using write-with-response", ts(), device.address());
+        eprintln!("{} remote {}: char has no write-without-response: using write-with-response", ts(), device.address());
         Outbound::Direct
     };
 

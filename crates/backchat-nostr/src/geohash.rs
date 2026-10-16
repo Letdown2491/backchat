@@ -10,7 +10,7 @@ use sha2::Digest;
 
 /// Derive a deterministic, unlinkable Nostr identity for a geohash cell:
 /// HMAC-SHA256(deviceSeed, geohash ‖ u32be(iteration)), retrying up to 10
-/// iterations for a valid secp256k1 key, with a sha256(seed‖msg) fallback —
+/// iterations for a valid secp256k1 key, with a sha256(seed‖msg) fallback;
 /// byte-for-byte the upstream schedule. The same cell string always yields
 /// the same identity on one device, while different devices never collide.
 pub fn derive_geohash_identity(device_seed: &[u8; 32], geohash: &str) -> Identity {
@@ -163,7 +163,7 @@ mod tests {
     }
 }
 
-/// Encode a lat/lon point as a geohash cell of `precision` characters —
+/// Encode a lat/lon point as a geohash cell of `precision` characters:
 /// the standard interleave algorithm (lon bit first, base32 MSB-first).
 /// Used for the location ladder in the channel browser; joins still accept
 /// any cell string the user types.
@@ -207,7 +207,7 @@ pub fn encode(lat: f64, lon: f64, precision: usize) -> String {
     out
 }
 
-/// Human label for a cell's zoom level — upstream's
+/// Human label for a cell's zoom level: upstream's
 /// `GeohashChannelLevel` mapping (`levelForLength` in
 /// LocationChannelsSheet.kt).
 pub fn level_name(len: usize) -> &'static str {

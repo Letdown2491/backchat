@@ -11,9 +11,9 @@ pub const NOISE_PUBKEY_LEN: usize = 32;
 pub enum PeerIdPrefix {
     /// No prefix.
     Empty,
-    /// `mesh:` — 16 hex chars.
+    /// `mesh:`: 16 hex chars.
     Mesh,
-    /// `name:` — display name fallback.
+    /// `name:`: display name fallback.
     Name,
     /// `noise:` + 64 hex chars (full Noise static public key).
     Noise,

@@ -5,7 +5,7 @@ pub const BLOCK_SIZES: [usize; 4] = [256, 512, 1024, 2048];
 
 /// Pad `data` up to `target_size` with PKCS#7-style padding (every pad byte
 /// equals the pad length). Declines when more than 255 bytes would be needed
-/// — a frame far below its bucket is emitted unpadded, by upstream rule.
+///: a frame far below its bucket is emitted unpadded, by upstream rule.
 pub fn pad(data: &[u8], target_size: usize) -> Vec<u8> {
     let mut out = data.to_vec();
     let padding_needed = target_size.saturating_sub(out.len());

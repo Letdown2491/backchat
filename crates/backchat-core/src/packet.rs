@@ -78,7 +78,7 @@ impl Packet {
     /// the Ed25519 signature.
     ///
     /// Upstream signs `BinaryProtocol.encode(unsignedPacket)` whose `padding`
-    /// parameter defaults to TRUE — even when the packet is *sent* unpadded
+    /// parameter defaults to TRUE: even when the packet is *sent* unpadded
     /// (`BLEOutboundPacketPolicy.padsBLEFrame` returns false for announces and
     /// messages). So signatures cover the whole-frame bucket-padded form;
     /// sign unpadded and every client rejects your packets.
@@ -378,8 +378,8 @@ mod tests {
 
     #[test]
     fn signing_bytes_are_bucket_padded() {
-        // Upstream signs BinaryProtocol.encode(unsigned) with padding:true —
-        // the whole frame padded to the 256/512/1024/2048 bucket — even for
+        // Upstream signs BinaryProtocol.encode(unsigned) with padding:true;
+        // the whole frame padded to the 256/512/1024/2048 bucket: even for
         // packets sent unpadded. Signing unpadded makes every client reject
         // our packets (announces, messages, everything signed).
         let pkt = Packet::new(MessageType::Message, sender(), 1_759_000_000_000, b"hello".to_vec(), 7);

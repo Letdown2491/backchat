@@ -1,6 +1,6 @@
 //! NIP-13 proof-of-work nonce tags for kind-20000 geohash messages.
 //! Port of `NostrPoW.swift` semantics: mine a `nonce` tag so the event id
-//! has the target number of leading zero bits; bounded by a time cap —
+//! has the target number of leading zero bits, bounded by a time cap;
 //! sending is never blocked, so on timeout the event ships at whatever
 //! difficulty was reached (none, if no nonce qualified).
 

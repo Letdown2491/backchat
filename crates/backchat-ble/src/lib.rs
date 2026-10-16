@@ -1,7 +1,7 @@
 //! backchat-ble: the Bluetooth LE mesh transport for Linux.
 //!
 //! Upstream sources of truth (see PORTING.md):
-//! - GATT service UUIDs — mainnet `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C`,
+//! - GATT service UUIDs: mainnet `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C`,
 //!   testnet `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A` (`BLEService.swift`)
 //! - characteristic `A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D`, 512 B link MTU
 //! - fragment chunking ~469 B (`TransportConfig.bleDefaultFragmentSize`),
@@ -13,7 +13,7 @@
 //!   deployed extracted-nonce transport frame)
 //!
 //! Architecture mirrors upstream's split: [`engine`] is the pure packet
-//! pipeline (dedup, TTL relay, fragments, sessions, registry — no I/O,
+//! pipeline (dedup, TTL relay, fragments, sessions, registry: no I/O,
 //! fully unit-testable with virtual packet flows), [`link`] is the bluer
 //! radio (peripheral advertise + GATT *and* central scan + connect on one
 //! adapter), and [`node`] glues them together with channels for the app.
@@ -29,7 +29,7 @@ use uuid::Uuid;
 /// Mainnet GATT service UUID (`BLEService.swift`).
 pub const SERVICE_UUID: Uuid =
     Uuid::from_u128(0xF47B_5E2D_4A9E_4C5A_9B3F_8E1D_2C3A_4B5C);
-/// Testnet GATT service UUID — iOS DEBUG builds advertise this.
+/// Testnet GATT service UUID: iOS DEBUG builds advertise this.
 pub const SERVICE_UUID_TESTNET: Uuid =
     Uuid::from_u128(0xF47B_5E2D_4A9E_4C5A_9B3F_8E1D_2C3A_4B5A);
 /// The one GATT characteristic carrying all framed packets.

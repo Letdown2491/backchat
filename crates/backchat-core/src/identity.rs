@@ -1,7 +1,7 @@
 //! Long-lived mesh identity: an X25519 Noise static keypair (peer ID +
 //! sessions) and an independent Ed25519 signing keypair (packet/announce
 //! signatures). Upstream stores both in the keychain
-//! (`NoiseEncryptionService.swift` — the signing key is a separate Ed25519
+//! (`NoiseEncryptionService.swift`: the signing key is a separate Ed25519
 //! key, *not* derived from the Noise key).
 
 use ed25519_dalek::Signer;
@@ -14,9 +14,9 @@ pub const IDENTITY_BLOB_LEN: usize = 64;
 
 #[derive(Clone)]
 pub struct MeshIdentity {
-    /// X25519 Noise static keypair — determines the peer ID.
+    /// X25519 Noise static keypair: determines the peer ID.
     pub noise: crate::noise::StaticIdentity,
-    /// Ed25519 signing keypair — announces and signed packets.
+    /// Ed25519 signing keypair: announces and signed packets.
     pub signing: ed25519_dalek::SigningKey,
 }
 

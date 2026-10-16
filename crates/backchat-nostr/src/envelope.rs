@@ -1,11 +1,11 @@
 //! The private-envelope protocol. Port of `NostrProtocol.swift`.
 //!
 //! Layering (kinds reuse NIP-17/59 numbers but are NOT NIP-compatible):
-//! 1. rumor — unsigned kind-14 event (pubkey, created_at = real timestamp,
+//! 1. rumor: unsigned kind-14 event (pubkey, created_at = real timestamp,
 //!    content = plaintext message)
-//! 2. seal — kind-13 event signed by the SENDER'S identity key; content is
+//! 2. seal: kind-13 event signed by the SENDER'S identity key; content is
 //!    `v2:`-encrypted rumor JSON
-//! 3. gift wrap — kind-1059 event signed by a one-time key; tags = the
+//! 3. gift wrap: kind-1059 event signed by a one-time key; tags = the
 //!    recipient `p`; content is `v2:`-encrypted seal JSON
 //!
 //! `v2:` = base64url(nonce24 ‖ ciphertext ‖ tag16) under
@@ -40,7 +40,7 @@ pub struct DecryptedPrivateMessage {
     pub content: String,
     /// The seal signer's pubkey (the authenticated sender).
     pub sender_pubkey: String,
-    /// The rumor's timestamp — the real message time (outer is randomized).
+    /// The rumor's timestamp: the real message time (outer is randomized).
     pub timestamp: i64,
 }
 

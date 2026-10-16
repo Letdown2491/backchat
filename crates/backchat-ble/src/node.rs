@@ -1,6 +1,6 @@
 //! Tokio glue: owns the persisted [`MeshIdentity`], the [`Engine`], and the
 //! link task; exposes a channel-based handle for the UI (works from any
-//! executor — including GPUI's — because it's just mpsc).
+//! executor: including GPUI's: because it's just mpsc).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -138,7 +138,7 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
 
         loop {
             // Heal check: the link has been reporting hard connect failures
-            // and nothing has arrived inbound for a long while — the adapter
+            // and nothing has arrived inbound for a long while: the adapter
             // is wedged. Rebuild the radio around a power cycle; the engine
             // (identity, sessions, registry) survives untouched.
             {
@@ -147,7 +147,7 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                 let silent_for = now.saturating_sub(last_inbound_ms);
                 if wedged >= 2 && silent_for > 120_000 {
                     eprintln!(
-                        "node: adapter wedged ({wedged} hard failures, no inbound for {:.0}s) — restarting the link",
+                        "node: adapter wedged ({wedged} hard failures, no inbound for {:.0}s): restarting the link",
                         silent_for / 1000
                     );
                     link.task.abort();
@@ -173,7 +173,7 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                     let Some(raw) = raw else {
                         // Link task ended (adapter reset, fatal bluer error):
                         // rebuild the radio instead of taking the node down.
-                        eprintln!("node: link ended — restarting");
+                        eprintln!("node: link ended: restarting");
                         link = match link::spawn(&link_config, false).await {
                             Ok(link) => {
                                 last_inbound_ms = now_ms();

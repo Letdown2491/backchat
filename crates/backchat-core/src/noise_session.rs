@@ -5,7 +5,7 @@
 //! - Transport wire frame: `4-byte big-endian nonce ‖ ciphertext ‖ 16-byte tag`.
 //! - The ChaCha20 nonce is the standard Noise IETF construction
 //!   `00000000 ‖ LE64(counter)`, but the counter is *carried in the frame*
-//!   (big-endian, low 32 bits — senders stop above `u32::MAX - 1`) instead of
+//!   (big-endian, low 32 bits: senders stop above `u32::MAX - 1`) instead of
 //!   being implicit, and the receiver applies a 1024-bit sliding replay
 //!   window rather than requiring in-order delivery.
 //! - Transport keys come from the standard `Split()`: `HKDF(ck, empty, 2)`;
@@ -112,7 +112,7 @@ fn mix_hash(h: &mut [u8; 32], data: &[u8]) {
 
 /// Keyed AEAD with a sequential per-key nonce (upstream `NoiseCipherState`):
 /// the nonce starts at 0 when `MIX_KEY` installs a new key and increments on
-/// EVERY use — including the empty-payload frames between tokens. This is
+/// EVERY use: including the empty-payload frames between tokens. This is
 /// why msg3's static is sealed at nonce 1, not 0.
 fn handshake_seal(key: &[u8; 32], h: &[u8; 32], nonce: u64, plaintext: &[u8]) -> Vec<u8> {
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
@@ -316,7 +316,7 @@ impl HandshakeInitiator {
         let e = XStaticSecret::random_from_rng(&mut OsRng);
         let e_pub = XPublicKey::from(&e).to_bytes();
         // ck = h = raw protocol name, then the (empty) prologue is mixed
-        // into h only — upstream does this unconditionally in
+        // into h only: upstream does this unconditionally in
         // mixPreMessageKeys(), so h becomes SHA256(name).
         let mut h = protocol_name_h();
         let ck = h;
@@ -353,7 +353,7 @@ impl HandshakeInitiator {
 
         // <- e
         mix_hash(&mut self.h, &e2);
-        // ee: DH(initiator e, responder e) — new key, nonce resets to 0
+        // ee: DH(initiator e, responder e): new key, nonce resets to 0
         let k = mix_key(&mut self.ck, self.e.diffie_hellman(&XPublicKey::from(e2)).as_bytes());
         self.aead_nonce = 0;
         // s: responder static, encrypted; authenticating h as AD
@@ -365,7 +365,7 @@ impl HandshakeInitiator {
         mix_hash(&mut self.h, ct_s_resp);
         let mut remote_static = [0u8; 32];
         remote_static.copy_from_slice(&s_resp);
-        // es: DH(initiator e, responder s) — new key, nonce resets to 0
+        // es: DH(initiator e, responder s): new key, nonce resets to 0
         self.k = mix_key(&mut self.ck, self.e.diffie_hellman(&XPublicKey::from(remote_static)).as_bytes());
         self.aead_nonce = 0;
         // trailing (empty) payload frame of msg2
@@ -381,7 +381,7 @@ impl HandshakeInitiator {
         let ct_s = handshake_seal(&self.k, &self.h, self.aead_nonce, &self.identity.public_key);
         self.aead_nonce += 1;
         mix_hash(&mut self.h, &ct_s);
-        // se: DH(initiator s, responder e) — new key, nonce resets to 0
+        // se: DH(initiator s, responder e): new key, nonce resets to 0
         let k_final = mix_key(&mut self.ck, self.s.diffie_hellman(&XPublicKey::from(e2)).as_bytes());
         // trailing (empty) payload frame of msg3
         let out_payload = handshake_seal(&k_final, &self.h, 0, &[]);
@@ -419,7 +419,7 @@ impl HandshakeResponder {
     pub fn new(identity: StaticIdentity) -> Self {
         let e = XStaticSecret::random_from_rng(&mut OsRng);
         // ck = h = raw protocol name, then the (empty) prologue is mixed
-        // into h only — upstream does this unconditionally in
+        // into h only: upstream does this unconditionally in
         // mixPreMessageKeys(), so h becomes SHA256(name).
         let mut h = protocol_name_h();
         let ck = h;
@@ -441,19 +441,19 @@ impl HandshakeResponder {
         e1.copy_from_slice(msg1);
         let e2_pub = XPublicKey::from(&self.e).to_bytes();
 
-        // <- e (remote, from msg1) — msg1 is processed first
+        // <- e (remote, from msg1): msg1 is processed first
         mix_hash(&mut self.h, &e1);
         mix_hash(&mut self.h, &[]); // msg1's keyless encryptAndHash(empty)
         // -> e (ours, being sent now): the sender mixes its own e token
         mix_hash(&mut self.h, &e2_pub);
-        // ee: DH(responder e, initiator e) — new key, nonce resets to 0
+        // ee: DH(responder e, initiator e): new key, nonce resets to 0
         let k = mix_key(&mut self.ck, self.e.diffie_hellman(&XPublicKey::from(e1)).as_bytes());
         self.aead_nonce = 0;
         // s: our encrypted static
         let ct_s = handshake_seal(&k, &self.h, self.aead_nonce, &self.identity.public_key);
         self.aead_nonce += 1;
         mix_hash(&mut self.h, &ct_s);
-        // es: DH(initiator e, responder s) — new key, nonce resets to 0
+        // es: DH(initiator e, responder s): new key, nonce resets to 0
         self.k = mix_key(&mut self.ck, self.s.diffie_hellman(&XPublicKey::from(e1)).as_bytes());
         self.aead_nonce = 0;
         // trailing (empty) payload frame
@@ -469,7 +469,7 @@ impl HandshakeResponder {
     }
 
     /// Consume msg3 `-> s, se, payload>` (64 bytes); finish into transport
-    /// ciphers. The initiator static arrives *claimed* inside msg3 — the
+    /// ciphers. The initiator static arrives *claimed* inside msg3: the
     /// caller must check `PeerId(remote_static) == packet.sender_id` before
     /// trusting it.
     pub fn step4(mut self, msg3: &[u8]) -> Result<CompletedHandshake, SessionError> {
@@ -592,7 +592,7 @@ mod tests {
         .build_initiator()
         .unwrap();
 
-        // Responder is mine (random ephemeral — msg3 is comparable because
+        // Responder is mine (random ephemeral: msg3 is comparable because
         // both initiators consume the same msg2).
         let mut resp = HandshakeResponder::new(StaticIdentity::generate());
 

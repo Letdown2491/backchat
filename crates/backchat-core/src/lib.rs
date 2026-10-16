@@ -5,7 +5,7 @@
 //! be understood by the iOS/Android clients, the fix belongs in this crate.
 //!
 //! Module map (see PORTING.md for the upstream source of each):
-//! - [`packet`]: BinaryProtocol port — header v1/v2, flags, compression, route
+//! - [`packet`]: BinaryProtocol port: header v1/v2, flags, compression, route
 //! - [`message_type`]: message type table with its reserved-history rules
 //! - [`peer_id`]: prefixed hex peer IDs and stable derivation
 //! - [`padding`]: Noise-frame bucket padding

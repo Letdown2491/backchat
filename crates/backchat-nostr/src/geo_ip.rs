@@ -1,5 +1,5 @@
 //! Coarse location estimate for the channel browser's "from your location"
-//! ladder. One IP-geolocation call, city-level accuracy at best — enough
+//! ladder. One IP-geolocation call, city-level accuracy at best: enough
 //! for the region/province/city rungs, which is precisely where upstream's
 //! GPS ladder is usable on mobile. The fix is never rendered as precise;
 //! the UI labels the section "est.".
@@ -28,7 +28,7 @@ struct IpWhoIs {
 }
 
 /// Fetch an approximate location from ipwho.is (keyless, HTTPS).
-/// Blocking with a hard timeout — run off the UI thread.
+/// Blocking with a hard timeout: run off the UI thread.
 pub fn fetch_approx_location() -> Option<GeoFix> {
     let body = ureq::get("https://ipwho.is/")
         .timeout(std::time::Duration::from_secs(6))

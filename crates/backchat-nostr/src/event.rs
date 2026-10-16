@@ -42,7 +42,7 @@ pub struct NostrEvent {
 }
 
 impl NostrEvent {
-    /// An unsigned event (id empty, no sig) — a "rumor" in BitChat terms.
+    /// An unsigned event (id empty, no sig): a "rumor" in BitChat terms.
     pub fn unsigned(pubkey: String, created_at: i64, kind: u32, tags: Vec<Vec<String>>, content: String) -> Self {
         Self { id: String::new(), pubkey, created_at, kind, tags, content, sig: None }
     }
@@ -63,7 +63,7 @@ impl NostrEvent {
     }
 
     /// The 32-byte sha256 of the canonical serialization (the message that
-    /// Schnorr signs) — its hex is the event id.
+    /// Schnorr signs): its hex is the event id.
     pub fn event_hash(&self) -> [u8; 32] {
         sha2::Sha256::digest(self.serialization()).into()
     }

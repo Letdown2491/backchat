@@ -28,7 +28,7 @@ pub enum CryptoError {
 }
 
 /// Raw secp256k1 ECDH shared secret: the 33-byte compressed point
-/// (0x02/0x03 prefix ‖ x) — upstream's P256K wrapper returns the shared
+/// (0x02/0x03 prefix ‖ x): upstream's P256K wrapper returns the shared
 /// secret in `.compressed` format, and the fixtures prove the HKDF input is
 /// the full 33 bytes (parity included), not the bare x-coordinate.
 ///

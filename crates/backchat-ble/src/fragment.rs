@@ -1,6 +1,6 @@
 //! Fragment chunking (outbound planning) and assembly (inbound).
 //!
-//! Wire format — fragment packet payload:
+//! Wire format: fragment packet payload:
 //! `[8-byte fragment id][2-byte index BE][2-byte total BE][1-byte original
 //! type][chunk]`, total ≤ 10 000 (`BLEFragmentHeader`). Fragments carry the
 //! *full original packet bytes*; the reassembled bytes are re-decoded as a

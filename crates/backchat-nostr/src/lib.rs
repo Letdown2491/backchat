@@ -1,15 +1,15 @@
 //! backchat-nostr: the internet transport.
 //!
 //! Upstream sources of truth (see PORTING.md):
-//! - `NostrEmbeddedBitChat.swift` — `bitchat1:` base64url embedding of whole
+//! - `NostrEmbeddedBitChat.swift`: `bitchat1:` base64url embedding of whole
 //!   packets (noiseEncrypted, ttl 7; random unlinkable sender IDs for
 //!   geohash DMs) → [`embedded`]
-//! - `NostrProtocol.swift` — the private-envelope scheme (kind 13/14/1059,
+//! - `NostrProtocol.swift`: the private-envelope scheme (kind 13/14/1059,
 //!   `v2:` + XChaCha20-Poly1305 over secp256k1 ECDH + HKDF-SHA256 with the
 //!   historical "nip44-v2" info label; NOT NIP-17/44/59) → [`envelope`]
-//! - `NostrIdentityBridge.swift` — HMAC-derived per-geohash personas →
+//! - `NostrIdentityBridge.swift`: HMAC-derived per-geohash personas →
 //!   [`geohash::derive_geohash_identity`]
-//! - `NostrPoW.swift` — NIP-13 nonce mining for kind-20000 → [`pow`]
+//! - `NostrPoW.swift`: NIP-13 nonce mining for kind-20000 → [`pow`]
 //! - `NostrRelayManager.swift` / `GeoRelayDirectory.swift` → [`relay`]
 
 pub mod crypto;

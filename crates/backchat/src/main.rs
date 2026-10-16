@@ -25,7 +25,7 @@ fn main() {
     let settings = persistence::load_settings();
 
     // Geo relay directory: remote fetch with bundled fallback (blocking,
-    // bounded by the fetch timeout — happens before the window opens).
+    // bounded by the fetch timeout; happens before the window opens).
     let directory = backchat_nostr::relay_geo::load_directory();
 
     // Tokio runtime on a background thread; the relay manager's tasks live
@@ -94,7 +94,7 @@ fn main() {
                         );
                         if !store.settings.nickname.is_empty() {
                             store.system_line(format!(
-                                "you are {} — /nick to change",
+                                "you are {}. /nick to change",
                                 store.settings.nickname
                             ));
                         }

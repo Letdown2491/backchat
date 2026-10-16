@@ -1,8 +1,8 @@
 //! The window: a people rail (spaces + everyone in range), the active
 //! space's conversation, and a composer that routes by space.
 //!
-//! Design model: two public spaces with one hue each — nearby (BLE mesh,
-//! mint) and channel (geohash over relays, sky) — plus private
+//! Design model: two public spaces with one hue each, nearby (BLE mesh,
+//! mint) and channel (geohash over relays, sky), plus private
 //! conversations (violet). The rail is the navigation: no back buttons,
 //! no hidden panes; people, presence, and unread are always visible.
 
@@ -28,7 +28,7 @@ const PRIVATE: u32 = 0xb8a1f5; // DMs
 /// Commands the slash menu completes while typing.
 const COMMANDS: [&str; 7] = ["/join", "/nick", "/msg", "/dm", "/back", "/peers", "/help"];
 
-/// Which conversation fills the main area — and where the composer sends.
+/// Which conversation fills the main area, and where the composer sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Space {
     /// BLE mesh: everyone in radio range (mint).
@@ -52,8 +52,8 @@ impl Space {
 pub struct ChatView {
     store: Entity<ChatStore>,
     input: Entity<TextInput>,
-    /// Plain scrollable log — no virtualization (uniform_list assumed equal
-    /// item heights and clipped message bodies).
+    /// Plain scrollable log (no virtualization: uniform_list assumes equal
+    /// item heights and clips message bodies).
     log_scroll: ScrollHandle,
     space: Space,
     last_count: usize,
@@ -110,7 +110,7 @@ impl ChatView {
                         return; // node gone
                     };
                     // A DM for the conversation that's currently open is
-                    // read on arrival — don't leave an unread badge up.
+                    // read on arrival; don't leave an unread badge up.
                     let sender = if let MeshEvent::PrivateMessage { sender_id, .. } = &event {
                         Some(*sender_id)
                     } else {
@@ -294,7 +294,7 @@ impl Render for ChatView {
             self.last_space = space.clone();
         } else {
             // Follow the tail only when the reader is at the bottom (or just
-            // switched spaces) — never yank someone reading history.
+            // switched spaces); never yank someone reading history.
             let count = lines.len();
             let at_bottom =
                 self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
@@ -308,13 +308,13 @@ impl Render for ChatView {
 
         // Contextual composer hint.
         let placeholder: SharedString = match &space {
-            Space::Nearby => "message everyone in range — /help for commands".into(),
-            Space::Channel if browsing => "/join <geohash> \u{2014} pick a row above or type one".into(),
+            Space::Nearby => "message everyone in range. /help lists commands".into(),
+            Space::Channel if browsing => "/join <geohash>: pick a row above or type one".into(),
             Space::Channel => match &geohash {
                 Some(g) => format!("message #{g}").into(),
                 None => "/join <geohash> to start chatting".into(),
             },
-            Space::Person(_, nick) => format!("private to {nick} — end-to-end encrypted").into(),
+            Space::Person(_, nick) => format!("private to {nick} · end-to-end encrypted").into(),
         };
         self.input.update(cx, |input, _| input.set_placeholder(placeholder));
         let input_text = self.input.read(cx).content.to_string();
@@ -454,7 +454,7 @@ impl Render for ChatView {
                                 .text_size(px(12.))
                                 .italic()
                                 .text_color(rgb(DIM))
-                                .child("nobody yet — peers in bluetooth range appear here"),
+                                .child("nobody yet. peers in bluetooth range appear here"),
                         )
                     })
                     .child(div().flex_1())
@@ -801,24 +801,24 @@ impl ChatView {
         let empty: Vec<(&str, String, String)> = match space {
             Space::Nearby => vec![
                 ("\u{25c7}", "nearby".into(), "everyone in bluetooth range, right now".into()),
-                ("", "people appear here automatically as they advertise \u{2014} on a phone, bitchat must be foreground with the screen on".into(), String::new()),
+                ("", "people appear here automatically as they advertise. on a phone, keep bitchat open with the screen on".into(), String::new()),
                 ("", "say something: it goes to every peer in range, relayed hop by hop".into(), String::new()),
             ],
             Space::Channel => match &self.store.read(cx).geohash {
                 Some(g) => vec![
                     ("#", format!("#{g}"), "location-scoped room, carried by relays".into()),
-                    ("", "messages are ephemeral \u{2014} the last hour only".into(), String::new()),
+                    ("", "messages are ephemeral: the last hour only".into(), String::new()),
                     ("", "your identity here rotates per channel; it's not your mesh name".into(), String::new()),
                 ],
                 None => vec![
                     ("#", "join a channel".into(), "rooms keyed by geohash".into()),
-                    ("", "/join <geohash> \u{2014} e.g. /join 9q8yy (San Francisco)".into(), String::new()),
+                    ("", "/join <geohash>, e.g. /join 9q8yy (San Francisco)".into(), String::new()),
                     ("", "works with or without the mesh: relays carry it".into(), String::new()),
                 ],
             },
             Space::Person(_, nick) => vec![
                 ("\u{25c7}", format!("private with {nick}"), "end-to-end encrypted (noise)".into()),
-                ("", "the first message opens the encrypted channel \u{2014} it may take a second".into(), String::new()),
+                ("", "the first message opens the encrypted channel. it may take a second".into(), String::new()),
                 ("", "only you two can read these".into(), String::new()),
             ],
         };
@@ -1048,11 +1048,11 @@ impl ChatView {
         if nothing_matches {
             if let Some(f) = &filter {
                 kids.push(status_line(format!(
-                    "no channels match {f} \u{2014} press Enter to join it anyway"
+                    "no channels match {f}. press Enter to join it anyway"
                 )));
             } else if !geo_loading {
                 kids.push(status_line(
-                    "nothing yet \u{2014} or type /join <geohash> to go anywhere",
+                    "nothing yet. or type /join <geohash> to go anywhere",
                 ));
             }
         }

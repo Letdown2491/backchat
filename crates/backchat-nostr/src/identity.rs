@@ -1,6 +1,6 @@
 //! Nostr identity: a secp256k1 keypair behind BIP-340 Schnorr.
 //! Port of `NostrIdentity.swift` (the geohash ephemeral personas use this
-//! too — a fresh identity per geohash cell).
+//! too: a fresh identity per geohash cell).
 
 use secp256k1::Secp256k1;
 
@@ -34,7 +34,7 @@ impl Identity {
         hex::encode(self.secret.secret_bytes())
     }
 
-    /// The x-only public key hex (64 chars) — the Nostr pubkey.
+    /// The x-only public key hex (64 chars): the Nostr pubkey.
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.keypair.x_only_public_key().0.serialize())
     }
