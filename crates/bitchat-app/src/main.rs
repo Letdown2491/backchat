@@ -76,7 +76,7 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.bind_keys(input::key_bindings());
 
-        let bounds = Bounds::centered(None, size(px(520.), px(720.)), cx);
+        let bounds = Bounds::centered(None, size(px(720.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -97,8 +97,6 @@ fn main() {
                                 "you are {} — /nick to change",
                                 store.settings.nickname
                             ));
-                        } else {
-                            store.system_line("bitchat-rs: /join <geohash> to chat, /help for commands");
                         }
                         store
                     });

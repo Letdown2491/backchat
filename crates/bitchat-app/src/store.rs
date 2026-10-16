@@ -13,15 +13,22 @@ use bitchat_nostr::relay::{RelayCommand, Subscription};
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// One rendered line in the chat pane.
+/// One rendered line in a space's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatLine {
     /// Local system notice (joins, errors, help).
     System { text: String },
-    /// A channel message. `self` echoes our own sends; `mesh` marks a
-    /// message that arrived over (or was echoed onto) the BLE mesh —
-    /// geohash-relay traffic uses different identities.
-    Message { sender: String, content: String, ours: bool, timestamp: i64, mesh: bool },
+    /// A message. `self` echoes our own sends.
+    Message { sender: String, content: String, ours: bool, timestamp: i64 },
+}
+
+/// A row of the people rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonRow {
+    pub peer_id: [u8; 8],
+    pub nickname: String,
+    pub unread: usize,
+    pub online: bool,
 }
 
 /// One line of a private conversation with a mesh peer.
@@ -34,17 +41,6 @@ pub struct DmLine {
     /// Status notice (handshake progress), not a message — rendered as an
     /// unobtrusive inline note.
     pub notice: bool,
-}
-
-/// One row of the conversations list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DmOverview {
-    pub peer_id: [u8; 8],
-    pub nickname: String,
-    /// Last message, prefixed "you:" when we sent it.
-    pub preview: String,
-    pub unread: usize,
-    pub online: bool,
 }
 
 struct Peer {
@@ -60,7 +56,10 @@ pub struct ChatStore {
     /// Identity for the current geohash (derived from the device seed).
     pub persona: Option<Identity>,
     pub geohash: Option<String>,
-    pub lines: Vec<ChatLine>,
+    /// Nearby (BLE mesh) space log: everyone in radio range.
+    pub nearby: Vec<ChatLine>,
+    /// Channel (geohash over relays) space log.
+    pub channel: Vec<ChatLine>,
     pub connected_relays: usize,
     /// pubkey hex → presence state for the current channel.
     peers: HashMap<String, Peer>,
@@ -91,7 +90,8 @@ impl ChatStore {
             directory,
             persona: None,
             geohash: None,
-            lines: Vec::new(),
+            nearby: Vec::new(),
+            channel: Vec::new(),
             connected_relays: 0,
             peers: HashMap::new(),
             relay_tx,
@@ -103,14 +103,31 @@ impl ChatStore {
         }
     }
 
+    /// Identity-level notice: lands in both spaces' logs.
     pub fn system_line(&mut self, text: impl Into<String>) {
-        self.lines.push(ChatLine::System { text: text.into() });
+        let text: String = text.into();
+        self.nearby.push(ChatLine::System { text: text.clone() });
+        self.channel.push(ChatLine::System { text });
+        self.trim();
+    }
+
+    /// Notice only in the nearby (mesh) log.
+    pub fn log_nearby(&mut self, text: impl Into<String>) {
+        self.nearby.push(ChatLine::System { text: text.into() });
+        self.trim();
+    }
+
+    /// Notice only in the channel (geohash) log.
+    pub fn log_channel(&mut self, text: impl Into<String>) {
+        self.channel.push(ChatLine::System { text: text.into() });
         self.trim();
     }
 
     fn trim(&mut self) {
-        if self.lines.len() > 1000 {
-            self.lines.drain(..self.lines.len() - 1000);
+        for log in [&mut self.nearby, &mut self.channel] {
+            if log.len() > 1000 {
+                log.drain(..log.len() - 1000);
+            }
         }
     }
 
@@ -125,9 +142,7 @@ impl ChatStore {
         self.geohash = Some(geohash_str.clone());
         self.persona = Some(geohash::derive_geohash_identity(&self.device_seed, &geohash_str));
         self.peers.clear();
-        self.lines.push(ChatLine::System {
-            text: format!("joined #{geohash_str} (identity rotates per channel)"),
-        });
+        self.log_channel(format!("joined #{geohash_str} — identity rotates per channel"));
 
         // Re-pick the relay set: nearest 5 relays to this cell, exactly as
         // upstream selects them, so peers in the channel are reachable.
@@ -138,7 +153,7 @@ impl ChatStore {
         );
         if !relays.is_empty() {
             let _ = self.relay_tx.send(RelayCommand::SetRelays(relays.clone()));
-            self.system_line(format!("relays: {}", relays.join(", ")));
+            self.log_channel(format!("relays: {}", relays.join(", ")));
         }
 
         let filter = bitchat_nostr::relay::geohash_filter(&geohash_str, 3600);
@@ -164,41 +179,50 @@ impl ChatStore {
         let _ = crate::persistence::save_settings(&self.settings);
     }
 
-    /// Send a public message: geohash channel (if joined) and BLE mesh
-    /// (if up) are independent transports; either alone suffices.
-    pub fn send_message(&mut self, content: &str) {
+    /// Broadcast to everyone in radio range (nearby space).
+    pub fn send_nearby(&mut self, content: &str) {
         if content.trim().is_empty() {
             return;
         }
-        let mesh_up = self.mesh_tx.is_some();
-        let geohash_str = self.geohash.clone();
-        if geohash_str.is_none() && !mesh_up {
-            self.system_line("nowhere to send — /join <geohash>, or wait for the BLE mesh to find a peer");
+        if self.mesh_tx.is_none() {
+            self.log_nearby("mesh is not running (bluetooth unavailable?)");
             return;
         }
-        if let Some(geohash_str) = geohash_str {
-            let persona = self.persona.as_ref().expect("persona exists after join");
-            let event = geohash::create_ephemeral_geohash_event(
-                content,
-                &geohash_str,
-                persona,
-                Some(&self.settings.nickname),
-                false,
-            );
-            let _ = self.relay_tx.send(RelayCommand::Publish(event));
-        }
-        // Local echo once, regardless of which transports carried it.
-        self.lines.push(ChatLine::Message {
+        self.send_mesh_public(content);
+        self.nearby.push(ChatLine::Message {
             sender: self.nickname_or_id(),
             content: content.to_string(),
             ours: true,
             timestamp: now_secs(),
-            mesh: mesh_up,
         });
         self.trim();
-        if mesh_up {
-            self.send_mesh_public(content);
+    }
+
+    /// Publish to the geohash channel (channel space).
+    pub fn send_channel(&mut self, content: &str) {
+        if content.trim().is_empty() {
+            return;
         }
+        let Some(geohash_str) = self.geohash.clone() else {
+            self.log_channel("not in a channel — /join <geohash> first");
+            return;
+        };
+        let persona = self.persona.as_ref().expect("persona exists after join");
+        let event = geohash::create_ephemeral_geohash_event(
+            content,
+            &geohash_str,
+            persona,
+            Some(&self.settings.nickname),
+            false,
+        );
+        let _ = self.relay_tx.send(RelayCommand::Publish(event));
+        self.channel.push(ChatLine::Message {
+            sender: self.nickname_or_id(),
+            content: content.to_string(),
+            ours: true,
+            timestamp: now_secs(),
+        });
+        self.trim();
     }
 
     fn send_presence(&self) {
@@ -229,12 +253,11 @@ impl ChatStore {
                     return;
                 }
                 let sender = self.note_peer(&event.pubkey, tag_value(&event.tags, "n"), event.created_at);
-                self.lines.push(ChatLine::Message {
+                self.channel.push(ChatLine::Message {
                     sender,
                     content: event.content.clone(),
                     ours: false,
                     timestamp: event.created_at,
-                    mesh: false,
                 });
                 self.trim();
             }
@@ -256,22 +279,21 @@ impl ChatStore {
         match event {
             MeshEvent::PeerSeen { peer_id, nickname, is_new } => {
                 if is_new {
-                    self.system_line(format!("{nickname} discovered over BLE mesh"));
+                    self.log_nearby(format!("{nickname} is here"));
                 }
                 self.mesh_peers.insert(peer_id, (nickname, now_secs()));
             }
             MeshEvent::PeerExpired { peer_id } => {
                 if let Some((nick, _)) = self.mesh_peers.remove(&peer_id) {
-                    self.system_line(format!("{nick} left the mesh"));
+                    self.log_nearby(format!("{nick} left"));
                 }
             }
             MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
-                self.lines.push(ChatLine::Message {
+                self.nearby.push(ChatLine::Message {
                     sender: nickname,
                     content,
                     ours: false,
                     timestamp: (timestamp / 1000) as i64,
-                    mesh: true,
                 });
                 self.trim();
             }
@@ -304,11 +326,10 @@ impl ChatStore {
                     notice: false,
                 });
                 *self.unread.entry(sender_id).or_default() += 1;
-                // Keep a pointer in the main log too — the DM pane is
-                // opt-in, so arriving DMs must announce themselves.
-                self.lines.push(ChatLine::System {
-                    text: format!("{nickname} sent you a private message — /dm {nickname} to read & reply"),
-                });
+                // Presence of the message lives in the people rail (unread
+                // badge); the nearby log gets a pointer so it's never
+                // invisible.
+                self.log_nearby(format!("{nickname} sent you a private message"));
                 self.trim();
             }
         }
@@ -358,56 +379,76 @@ impl ChatStore {
         self.unread.values().sum()
     }
 
-    /// Conversations list: one row per mesh peer, most recent activity
-    /// first. Peers we share a room with but never DM'd show too — a
-    /// conversation is one click away before it exists.
-    pub fn dm_overview(&self, now: i64) -> Vec<DmOverview> {
-        let mut rows: Vec<DmOverview> = self
+    /// People for the rail: live mesh peers plus anyone with conversation
+    /// history. Unread first, then online, then name.
+    pub fn people(&self, now: i64) -> Vec<PersonRow> {
+        let mut rows: Vec<PersonRow> = self
             .mesh_peers
             .iter()
-            .map(|(id, (nick, seen))| {
-                let history = self.dms.get(id);
-                let preview = history
-                    .and_then(|h| h.last())
-                    .map(|last| {
-                        if last.ours {
-                            format!("you: {}", last.content)
-                        } else {
-                            last.content.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| "no messages yet".to_string());
-                DmOverview {
-                    peer_id: *id,
-                    nickname: nick.clone(),
-                    preview,
-                    unread: self.unread.get(id).copied().unwrap_or(0),
-                    online: now - seen < 600,
-                }
+            .map(|(id, (nick, seen))| PersonRow {
+                peer_id: *id,
+                nickname: nick.clone(),
+                unread: self.unread.get(id).copied().unwrap_or(0),
+                online: now - seen < 600,
             })
             .collect();
-        // Sort: unread first, then online, then most recent message.
-        rows.sort_by_key(|r| {
-            let last_ts = self
+        for (id, unread) in &self.unread {
+            if rows.iter().any(|r| &r.peer_id == id) {
+                continue;
+            }
+            let nick = self
                 .dms
-                .get(&r.peer_id)
-                .and_then(|h| h.last())
-                .map(|l| l.timestamp)
-                .unwrap_or(0);
-            (std::cmp::Reverse(r.unread > 0), std::cmp::Reverse(r.online), std::cmp::Reverse(last_ts))
+                .get(id)
+                .and_then(|h| h.iter().rev().find(|l| !l.sender.is_empty()))
+                .map(|l| l.sender.clone())
+                .unwrap_or_else(|| format!("anon-{}", hex::encode(&id[..2])));
+            rows.push(PersonRow {
+                peer_id: *id,
+                nickname: nick,
+                unread: *unread,
+                online: false,
+            });
+        }
+        rows.sort_by_key(|r| {
+            (
+                std::cmp::Reverse(r.unread > 0),
+                std::cmp::Reverse(r.online),
+                r.nickname.to_lowercase(),
+            )
         });
         rows
     }
 
+    /// Nickname change propagates to the mesh (re-announce).
     /// Send a DM to a resolved peer and echo it into the conversation.
     pub fn send_dm_to(&mut self, peer_id: [u8; 8], content: &str) {
         if content.trim().is_empty() {
             return;
         }
         let Some(mesh_tx) = &self.mesh_tx else {
-            self.system_line("mesh is not running (bluetooth unavailable?)");
+            self.log_nearby("mesh is not running (bluetooth unavailable?)");
             return;
         };
+        let in_range = self
+            .mesh_peers
+            .get(&peer_id)
+            .is_some_and(|(_, seen)| now_secs() - seen < 600);
+        if !in_range {
+            let nick = self
+                .people(now_secs())
+                .into_iter()
+                .find(|r| r.peer_id == peer_id)
+                .map(|r| r.nickname)
+                .unwrap_or_else(|| hex::encode(&peer_id[..2]));
+            self.dms.entry(peer_id).or_default().push(DmLine {
+                sender: String::new(),
+                content: format!("not delivered \u{2014} {nick} is out of range"),
+                ours: false,
+                timestamp: now_secs(),
+                notice: true,
+            });
+            return;
+        }
         let _ = mesh_tx.try_send(MeshCommand::SendPrivate {
             peer: peer_id,
             content: content.to_string(),
@@ -422,6 +463,11 @@ impl ChatStore {
         });
     }
 
+    /// Count of mesh peers seen in the last 10 minutes.
+    pub fn mesh_peer_count(&self, now: i64) -> usize {
+        self.mesh_peers.values().filter(|(_, seen)| now - seen < 600).count()
+    }
+
     /// True while the link layer is rebuilding (wedge recovery).
     pub fn mesh_is_restarting(&self) -> bool {
         self.mesh_restarting
@@ -430,21 +476,6 @@ impl ChatStore {
     /// True when the mesh node exists (bluetooth usable).
     pub fn mesh_is_up(&self) -> bool {
         self.mesh_tx.is_some()
-    }
-
-    pub fn mesh_peer_count(&self, now: i64) -> usize {
-        self.mesh_peers.values().filter(|(_, seen)| now - seen < 600).count()
-    }
-
-    pub fn mesh_peer_names(&self, now: i64) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .mesh_peers
-            .iter()
-            .filter(|(_, (_, seen))| now - *seen < 600)
-            .map(|(_, (n, _))| n.clone())
-            .collect();
-        names.sort();
-        names
     }
 
     /// Nickname change propagates to the mesh (re-announce).
@@ -495,17 +526,6 @@ impl ChatStore {
         self.peers.values().filter(|p| now - p.last_seen < 600).count()
     }
 
-    /// Nicknames of peers present in the current channel.
-    pub fn channel_nicknames(&self, now: i64) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .peers
-            .values()
-            .filter(|p| now - p.last_seen < 600)
-            .filter_map(|p| p.nickname.clone())
-            .collect();
-        names.sort();
-        names
-    }
 }
 
 pub fn now_secs() -> i64 {
@@ -533,13 +553,13 @@ mod tests {
     }
 
     #[test]
-    fn mesh_sends_work_without_joining_a_channel() {
+    fn nearby_sends_need_only_the_mesh() {
         let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
         let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
             tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
-        store.send_message("over the mesh");
-        // Echoed locally and dispatched to the mesh node — no geohash needed.
-        match store.lines.last() {
+        store.send_nearby("over the mesh");
+        // Echoed locally in the nearby space and dispatched to the mesh node.
+        match store.nearby.last() {
             Some(ChatLine::Message { content, ours, .. }) => {
                 assert_eq!(content, "over the mesh");
                 assert!(ours);
@@ -550,11 +570,100 @@ mod tests {
             MeshCommand::SendPublic(text) => assert_eq!(text, "over the mesh"),
             other => panic!("expected SendPublic, got {other:?}"),
         }
-        // With no mesh and no channel, the user gets guidance instead of silence.
+        // With no mesh, the user gets guidance instead of silence.
         let mut offline = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
             tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, None);
-        offline.send_message("hello");
-        assert!(matches!(offline.lines.last(), Some(ChatLine::System { .. })));
+        offline.send_nearby("hello");
+        assert!(matches!(offline.nearby.last(), Some(ChatLine::System { .. })));
+    }
+
+    #[test]
+    fn channel_sends_need_a_join() {
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<RelayCommand>();
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), relay_tx, None);
+        store.send_channel("hi"); // not joined → guidance, nothing published
+        assert!(matches!(store.channel.last(), Some(ChatLine::System { .. })));
+        assert!(relay_rx.try_recv().is_err());
+
+        store.join("DR5RS"); // rejoin normalizes
+        store.send_channel("hello channel");
+        match store.channel.last() {
+            Some(ChatLine::Message { content, ours, .. }) => {
+                assert_eq!(content, "hello channel");
+                assert!(ours);
+            }
+            other => panic!("expected local echo, got {other:?}"),
+        }
+        // join() queues SetRelays + Subscribe first; drain to the publish.
+        loop {
+            match relay_rx.try_recv().expect("relay publish") {
+                RelayCommand::Publish(_) => break,
+                _ => continue,
+            }
+        }
+    }
+
+    #[test]
+    fn join_derives_persona_and_subscribes() {
+        let mut store = store_with_channel();
+        assert_eq!(store.geohash.as_deref(), Some("dr5rs"));
+        assert!(store.persona.is_some());
+        // The join produced a channel notice and a presence publish.
+        assert!(matches!(store.channel.first(), Some(ChatLine::System { .. })));
+    }
+
+    #[test]
+    fn inbound_events_render_and_authenticate() {
+        let mut store = store_with_channel();
+        let peer = Identity::generate();
+        let event = geohash::create_ephemeral_geohash_event(
+            "hi from a peer",
+            "dr5rs",
+            &peer,
+            Some("peer_nick"),
+            false,
+        );
+        store.on_relay_event(event);
+        match store.channel.last() {
+            Some(ChatLine::Message { sender, content, ours, .. }) => {
+                assert_eq!((sender.as_str(), content.as_str(), *ours), ("peer_nick", "hi from a peer", false));
+            }
+            other => panic!("expected peer message, got {other:?}"),
+        }
+
+        // Forged signature is dropped.
+        let mut forged = geohash::create_ephemeral_geohash_event(
+            "forged", "dr5rs", &Identity::generate(), None, false,
+        );
+        forged.sig = Some("0".repeat(128));
+        let len_before = store.channel.len();
+        store.on_relay_event(forged);
+        assert_eq!(store.channel.len(), len_before);
+    }
+
+    #[test]
+    fn own_events_are_not_double_echoed() {
+        let mut store = store_with_channel();
+        let persona = store.persona.clone().unwrap();
+        let event = geohash::create_ephemeral_geohash_event("self", "dr5rs", &persona, None, false);
+        let len_before = store.channel.len();
+        store.on_relay_event(event);
+        assert_eq!(store.channel.len(), len_before);
+    }
+
+    #[test]
+    fn other_channels_are_ignored() {
+        let mut store = store_with_channel();
+        let event = geohash::create_ephemeral_geohash_event(
+            "elsewhere",
+            "zzzzz",
+            &Identity::generate(),
+            None,
+            false,
+        );
+        let len_before = store.channel.len();
+        store.on_relay_event(event);
+        assert_eq!(store.channel.len(), len_before);
     }
 
     #[test]
@@ -569,8 +678,8 @@ mod tests {
             is_new: true,
         });
 
-        // Open, send, receive: the conversation lives per peer, not in the
-        // main log.
+        // Open, send, receive: the conversation lives per peer, not in a
+        // space log.
         assert_eq!(store.open_dm("PHONE").map(|(p, _)| p), Some(peer));
         store.send_dm_to(peer, "hello private");
         store.on_mesh_event(MeshEvent::PrivateMessage {
@@ -586,104 +695,47 @@ mod tests {
 
         // Unread accounting: one arrived, opening the conversation clears it.
         assert_eq!(store.total_unread(), 1);
-        let overview = store.dm_overview(now_secs());
-        assert_eq!(overview.len(), 1);
-        assert_eq!((overview[0].unread, overview[0].preview.as_str()), (1, "hello back"));
+        let people = store.people(now_secs());
+        assert_eq!(people.len(), 1);
+        assert_eq!((people[0].unread, people[0].nickname.as_str()), (1, "phone"));
         store.mark_dm_read(&peer);
         assert_eq!(store.total_unread(), 0);
 
-        // The DM went out over the mesh, and the main log only carries a
-        // pointer to the conversation, not the content.
+        // The DM went out over the mesh; the nearby log carries a pointer.
         match mesh_rx.try_recv().expect("mesh command") {
             MeshCommand::SendPrivate { peer: p, content } => {
                 assert_eq!((p, content.as_str()), (peer, "hello private"));
             }
             other => panic!("expected SendPrivate, got {other:?}"),
         }
-        assert!(store.lines.iter().any(|l| matches!(
+        assert!(store.nearby.iter().any(|l| matches!(
             l,
-            ChatLine::System { text } if text.contains("/dm phone")
-        )));
-        assert!(!store.lines.iter().any(|l| matches!(
-            l,
-            ChatLine::Message { content, .. } if content == "hello private"
+            ChatLine::System { text } if text.contains("phone sent you a private message")
         )));
     }
 
     #[test]
-    fn join_derives_persona_and_subscribes() {
-        let mut store = store_with_channel();
-        assert_eq!(store.geohash.as_deref(), Some("dr5rs"));
-        assert!(store.persona.is_some());
-        // The join produced a system line and a presence publish.
-        assert!(matches!(store.lines.first(), Some(ChatLine::System { .. })));
+    fn out_of_range_dms_fail_honestly() {
+        let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
+        // Never seen: send_dm_to records a not-delivered notice, sends nothing.
+        store.send_dm_to([5u8; 8], "anyone there?");
+        assert!(mesh_rx.try_recv().is_err());
+        let history = store.dm_history(&[5u8; 8]);
+        assert_eq!(history.len(), 1);
+        assert!(history[0].notice);
+        assert!(history[0].content.contains("out of range"));
     }
 
     #[test]
-    fn send_message_echoes_locally_and_lowercases_geohash() {
+    fn radio_lifecycle_surfaces_in_the_nearby_log() {
         let mut store = store_with_channel();
-        store.join("DR5RS"); // rejoin normalizes
-        store.send_message("hello channel");
-        match store.lines.last() {
-            Some(ChatLine::Message { content, ours, .. }) => {
-                assert_eq!(content, "hello channel");
-                assert!(ours);
-            }
-            other => panic!("expected local echo, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn inbound_events_render_and_authenticate() {
-        let mut store = store_with_channel();
-        let peer = Identity::generate();
-        let event = geohash::create_ephemeral_geohash_event(
-            "hi from a peer",
-            "dr5rs",
-            &peer,
-            Some("peer_nick"),
-            false,
-        );
-        store.on_relay_event(event);
-        match store.lines.last() {
-            Some(ChatLine::Message { sender, content, ours, .. }) => {
-                assert_eq!((sender.as_str(), content.as_str(), *ours), ("peer_nick", "hi from a peer", false));
-            }
-            other => panic!("expected peer message, got {other:?}"),
-        }
-
-        // Forged signature is dropped.
-        let mut forged = geohash::create_ephemeral_geohash_event(
-            "forged", "dr5rs", &Identity::generate(), None, false,
-        );
-        forged.sig = Some("0".repeat(128));
-        let len_before = store.lines.len();
-        store.on_relay_event(forged);
-        assert_eq!(store.lines.len(), len_before);
-    }
-
-    #[test]
-    fn own_events_are_not_double_echoed() {
-        let mut store = store_with_channel();
-        let persona = store.persona.clone().unwrap();
-        let event = geohash::create_ephemeral_geohash_event("self", "dr5rs", &persona, None, false);
-        let len_before = store.lines.len();
-        store.on_relay_event(event);
-        assert_eq!(store.lines.len(), len_before);
-    }
-
-    #[test]
-    fn other_channels_are_ignored() {
-        let mut store = store_with_channel();
-        let event = geohash::create_ephemeral_geohash_event(
-            "elsewhere",
-            "zzzzz",
-            &Identity::generate(),
-            None,
-            false,
-        );
-        let len_before = store.lines.len();
-        store.on_relay_event(event);
-        assert_eq!(store.lines.len(), len_before);
+        store.on_mesh_event(MeshEvent::RadioRestarted { heal: true });
+        assert!(!store.mesh_is_restarting());
+        assert!(store.nearby.iter().any(|l| matches!(
+            l,
+            ChatLine::System { text } if text.contains("power-cycled")
+        )));
     }
 }
