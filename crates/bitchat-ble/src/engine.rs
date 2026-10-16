@@ -56,6 +56,13 @@ pub enum MeshEvent {
     PeerExpired { peer_id: [u8; 8] },
     PublicMessage { sender_id: [u8; 8], nickname: String, content: String, timestamp: u64 },
     PrivateMessage { sender_id: [u8; 8], nickname: String, content: String, message_id: String },
+    /// A DM was accepted without an established session: the engine queued
+    /// it and is opening the encrypted channel (lazy handshake).
+    DmPending { peer_id: [u8; 8] },
+    /// Link-layer lifecycle, emitted by the node (not the engine): the
+    /// radio died or was wedged and got restarted. `heal` marks the
+    /// power-cycle path (adapter wedge recovery).
+    RadioRestarted { heal: bool },
 }
 
 enum PendingHandshake {
@@ -502,6 +509,8 @@ impl Engine {
             if let Some(action) = self.initiate_handshake(peer, now_ms) {
                 actions.push(action);
             }
+            // Tell the UI the message is queued behind a handshake, not lost.
+            actions.push(Action::Event(MeshEvent::DmPending { peer_id: peer }));
         }
         self.outbox.push_back(PendingPrivate { peer, content: content.to_string(), message_id });
         actions

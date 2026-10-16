@@ -18,8 +18,10 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum ChatLine {
     /// Local system notice (joins, errors, help).
     System { text: String },
-    /// A channel message. `self` echoes our own sends.
-    Message { sender: String, content: String, ours: bool, timestamp: i64 },
+    /// A channel message. `self` echoes our own sends; `mesh` marks a
+    /// message that arrived over (or was echoed onto) the BLE mesh —
+    /// geohash-relay traffic uses different identities.
+    Message { sender: String, content: String, ours: bool, timestamp: i64, mesh: bool },
 }
 
 /// One line of a private conversation with a mesh peer.
@@ -29,6 +31,9 @@ pub struct DmLine {
     pub content: String,
     pub ours: bool,
     pub timestamp: i64,
+    /// Status notice (handshake progress), not a message — rendered as an
+    /// unobtrusive inline note.
+    pub notice: bool,
 }
 
 /// One row of the conversations list.
@@ -64,6 +69,8 @@ pub struct ChatStore {
     pub mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
     /// mesh peer id → (nickname, last_seen secs).
     mesh_peers: HashMap<[u8; 8], (String, i64)>,
+    /// Radio lifecycle: true while the link layer is rebuilding.
+    mesh_restarting: bool,
     /// Private conversation history per mesh peer, newest last.
     dms: HashMap<[u8; 8], Vec<DmLine>>,
     /// Unread DM count per peer; cleared when the conversation is opened.
@@ -92,6 +99,7 @@ impl ChatStore {
             mesh_peers: HashMap::new(),
             dms: HashMap::new(),
             unread: HashMap::new(),
+            mesh_restarting: false,
         }
     }
 
@@ -185,6 +193,7 @@ impl ChatStore {
             content: content.to_string(),
             ours: true,
             timestamp: now_secs(),
+            mesh: mesh_up,
         });
         self.trim();
         if mesh_up {
@@ -225,6 +234,7 @@ impl ChatStore {
                     content: event.content.clone(),
                     ours: false,
                     timestamp: event.created_at,
+                    mesh: false,
                 });
                 self.trim();
             }
@@ -261,8 +271,28 @@ impl ChatStore {
                     content,
                     ours: false,
                     timestamp: (timestamp / 1000) as i64,
+                    mesh: true,
                 });
                 self.trim();
+            }
+            MeshEvent::DmPending { peer_id } => {
+                // Honest feedback: queued behind a handshake, not delivered.
+                let pending = self.dms.entry(peer_id).or_default();
+                pending.push(DmLine {
+                    sender: String::new(),
+                    content: "opening encrypted channel\u{2026} your message sends automatically".into(),
+                    ours: true,
+                    timestamp: now_secs(),
+                    notice: true,
+                });
+            }
+            MeshEvent::RadioRestarted { heal } => {
+                self.mesh_restarting = false;
+                self.system_line(if heal {
+                    "bluetooth adapter wedged — power-cycled and restarted the radio"
+                } else {
+                    "radio restarted"
+                });
             }
             MeshEvent::PrivateMessage { sender_id, nickname, content, .. } => {
                 let viewed = self.dms.entry(sender_id).or_default();
@@ -271,6 +301,7 @@ impl ChatStore {
                     content,
                     ours: false,
                     timestamp: now_secs(),
+                    notice: false,
                 });
                 *self.unread.entry(sender_id).or_default() += 1;
                 // Keep a pointer in the main log too — the DM pane is
@@ -387,7 +418,18 @@ impl ChatStore {
             content: content.to_string(),
             ours: true,
             timestamp: now_secs(),
+            notice: false,
         });
+    }
+
+    /// True while the link layer is rebuilding (wedge recovery).
+    pub fn mesh_is_restarting(&self) -> bool {
+        self.mesh_restarting
+    }
+
+    /// True when the mesh node exists (bluetooth usable).
+    pub fn mesh_is_up(&self) -> bool {
+        self.mesh_tx.is_some()
     }
 
     pub fn mesh_peer_count(&self, now: i64) -> usize {
@@ -451,6 +493,18 @@ impl ChatStore {
     /// Count of peers seen in the last 10 minutes.
     pub fn peers_here(&self, now: i64) -> usize {
         self.peers.values().filter(|p| now - p.last_seen < 600).count()
+    }
+
+    /// Nicknames of peers present in the current channel.
+    pub fn channel_nicknames(&self, now: i64) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .peers
+            .values()
+            .filter(|p| now - p.last_seen < 600)
+            .filter_map(|p| p.nickname.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 

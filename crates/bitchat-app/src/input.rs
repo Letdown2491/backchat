@@ -269,6 +269,13 @@ impl TextInput {
         }
     }
 
+    /// Replace the field's content (cursor to end). Used by suggestions.
+    pub fn set_text(&mut self, text: &str) {
+        self.content = text.to_string().into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
+    }
+
     pub fn reset(&mut self) {
         self.content = "".into();
         self.selected_range = 0..0;

@@ -18,6 +18,9 @@ const FG_DIM: u32 = 0x6b7684;
 const ACCENT: u32 = 0x4fc08d;
 const INPUT_BG: u32 = 0x1a2028;
 
+/// Commands the slash menu completes while typing.
+const COMMANDS: [&str; 7] = ["/join", "/nick", "/msg", "/dm", "/back", "/peers", "/help"];
+
 pub struct ChatView {
     store: Entity<ChatStore>,
     input: Entity<TextInput>,
@@ -28,6 +31,7 @@ pub struct ChatView {
     /// Which pane the log area shows: the mesh/channel log, the
     /// conversations list, or one open private conversation.
     pane: Pane,
+    last_pane: Pane,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,7 @@ impl ChatView {
             log_scroll: ScrollHandle::new(),
             last_line_count: 0,
             pane: Pane::Log,
+            last_pane: Pane::Log,
         }
     }
 
@@ -194,16 +199,19 @@ impl Focusable for ChatView {
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = now_secs();
-        let (channel, peers, status, mesh_peers, unread, overview) = self.store.update(cx, |store, _| {
-            (
-                store.geohash.clone(),
-                store.peers_here(now),
-                store.connected_relays,
-                store.mesh_peer_count(now),
-                store.total_unread(),
-                store.dm_overview(now),
-            )
-        });
+        let (channel, peers, status, mesh_peers, unread, overview, mesh_up, restarting) =
+            self.store.update(cx, |store, _| {
+                (
+                    store.geohash.clone(),
+                    store.peers_here(now),
+                    store.connected_relays,
+                    store.mesh_peer_count(now),
+                    store.total_unread(),
+                    store.dm_overview(now),
+                    store.mesh_is_up(),
+                    store.mesh_is_restarting(),
+                )
+            });
         let pane = self.pane.clone();
         let lines: Vec<ChatLine> = self.store.update(cx, |store, _| store.lines.clone());
         let dm_lines: Vec<crate::store::DmLine> = match &pane {
@@ -217,14 +225,18 @@ impl Render for ChatView {
             Pane::DmList => overview.len(),
             Pane::Log => lines.len(),
         };
-        if display_count != self.last_line_count {
-            // Follow the tail: minimally reveal the newest line each frame
-            // the log grows.
-            if display_count > 0 {
-                self.log_scroll.scroll_to_item(display_count - 1);
-            }
-            self.last_line_count = display_count;
+        // Follow the tail only when the reader is already at the bottom (or
+        // just switched panes) — never yank someone who scrolled up to read.
+        // Follow the tail only when the reader is already at the bottom (or
+        // just switched panes) — never yank someone who scrolled up to read.
+        let at_bottom = self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
+        let pane_changed = self.last_pane != pane;
+        if display_count > 0 && (pane_changed || (display_count != self.last_line_count && at_bottom))
+        {
+            self.log_scroll.scroll_to_item(display_count - 1);
         }
+        self.last_line_count = display_count;
+        self.last_pane = pane.clone();
 
         // Header title (and a back affordance when away from the log).
         let title = match &pane {
@@ -235,6 +247,8 @@ impl Render for ChatView {
                 None => "bitchat-rs".to_string(),
             },
         };
+
+        let input_text = self.input.read(cx).content.to_string();
 
         // Contextual input hint per pane.
         let placeholder: SharedString = match &pane {
@@ -285,7 +299,7 @@ impl Render for ChatView {
                             })
                             .child(
                                 div()
-                                    .text_color(if pane != Pane::Log || channel.is_some() { rgb(ACCENT) } else { rgb(ACCENT) })
+                                    .text_color(rgb(ACCENT))
                                     .font_weight(FontWeight::BOLD)
                                     .child(title),
                             )
@@ -293,18 +307,51 @@ impl Render for ChatView {
                                 header
                                     .child(
                                         div()
+                                            .id("here")
                                             .text_size(px(12.))
                                             .text_color(rgb(FG_DIM))
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(rgb(FG)))
+                                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                let names = this.store.update(cx, |store, _| store.channel_nicknames(crate::store::now_secs()));
+                                                this.store.update(cx, |store, _| {
+                                                    if names.is_empty() {
+                                                        store.system_line("nobody else in this channel yet");
+                                                    } else {
+                                                        store.system_line(format!("in the channel: {}", names.join(", ")));
+                                                    }
+                                                });
+                                                cx.notify();
+                                            }))
                                             .child(format!("{peers} here")),
                                     )
                                     .child(
                                         div()
+                                            .id("mesh-state")
                                             .text_size(px(12.))
-                                            .text_color(if mesh_peers > 0 { rgb(ACCENT) } else { rgb(FG_DIM) })
-                                            .child(if mesh_peers > 0 {
-                                                format!("\u{25c8} {mesh_peers} mesh")
-                                            } else {
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(rgb(ACCENT)))
+                                            .text_color(
+                                                if restarting {
+                                                    rgb(FG_DIM)
+                                                } else if mesh_peers > 0 {
+                                                    rgb(ACCENT)
+                                                } else {
+                                                    rgb(FG_DIM)
+                                                },
+                                            )
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.pane = Pane::DmList;
+                                                cx.notify();
+                                            }))
+                                            .child(if restarting {
+                                                "\u{25cb} mesh restarting\u{2026}".to_string()
+                                            } else if mesh_peers > 0 {
+                                                format!("\u{25c9} {mesh_peers} mesh")
+                                            } else if mesh_up {
                                                 "\u{25c8} mesh".to_string()
+                                            } else {
+                                                "\u{2013} mesh off".to_string()
                                             }),
                                     )
                             }),
@@ -435,132 +482,231 @@ impl Render for ChatView {
                                 rows
                             }
                         }
-                        Pane::Dm(_, nick) => {
-                            let mut kids: Vec<AnyElement> = dm_lines
-                                .iter()
-                                .map(|dm| {
-                                    let bg = if dm.ours { BG_MINE } else { BG };
+                        pane @ (Pane::Dm(..) | Pane::Log) => {
+                            // Unified renderer for both history panes: bubble
+                            // rows with day separators; the log additionally
+                            // gets clickable sender names and system pills.
+                            let entries: Vec<(i64, String, String, bool, bool, bool)> =
+                                match pane {
+                                    Pane::Dm(peer, _) => dm_lines
+                                        .iter()
+                                        .map(|dm| {
+                                            (
+                                                dm.timestamp,
+                                                dm.sender.clone(),
+                                                dm.content.clone(),
+                                                dm.ours,
+                                                dm.notice,
+                                                true,
+                                            )
+                                        })
+                                        .collect(),
+                                    _ => lines
+                                        .iter()
+                                        .map(|line| match line {
+                                            ChatLine::System { text } => {
+                                                (0, String::new(), text.clone(), false, true, false)
+                                            }
+                                            ChatLine::Message { sender, content, ours, timestamp, mesh } => {
+                                                (*timestamp, sender.clone(), content.clone(), *ours, false, *mesh)
+                                            }
+                                        })
+                                        .collect(),
+                                };
+
+                            // First-run orientation: before any real content,
+                            // tell the reader what this screen is and what
+                            // the two transports need.
+                            let quiet_start = !matches!(pane, Pane::Dm(..))
+                                && entries.iter().all(|(_, _, _, _, notice, _)| *notice)
+                                && entries.len() <= 2;
+
+                            let mut kids: Vec<AnyElement> = Vec::new();
+                            if quiet_start {
+                                for (title, hint) in [
+                                    ("\u{25c8} mesh", "peers in bluetooth range appear automatically — on a phone, bitchat must be foreground with the screen on"),
+                                    ("\u{25cf} channel", "/join <geohash> to chat over relays — works with or without the mesh"),
+                                    ("\u{1f512} dms", "click a sender's name (or /dm <nick>) for end-to-end encrypted private chat"),
+                                ] {
+                                    kids.push(
+                                        div()
+                                            .px_3()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(rgb(ACCENT))
+                                                            .child(title),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .text_color(rgb(FG_DIM))
+                                                            .child(hint),
+                                                    ),
+                                            )
+                                            .into_any_element(),
+                                    );
+                                }
+                                kids.push(
+                                    div().px_3().py_1().into_any_element(),
+                                );
+                            }
+
+                            let mut last_day: Option<i64> = None;
+                            for (ts, sender, content, ours, notice, dm) in entries {
+                                // Day separator whenever the calendar day
+                                // changes (system notices carry no time).
+                                if ts > 0 {
+                                    let day = ts / 86_400;
+                                    if last_day != Some(day) {
+                                        last_day = Some(day);
+                                        kids.push(day_divider(day_label(day)).into_any_element());
+                                    }
+                                }
+                                if notice {
+                                    // Inline status note, unobtrusive.
+                                    kids.push(
+                                        div()
+                                            .px_3()
+                                            .text_size(px(11.))
+                                            .italic()
+                                            .text_color(rgb(FG_DIM))
+                                            .child(content)
+                                            .into_any_element(),
+                                    );
+                                    continue;
+                                }
+                                if !dm {
+                                    // System pill in the main log: centered,
+                                    // clearly not a conversation turn.
+                                    kids.push(system_pill(content).into_any_element());
+                                    continue;
+                                }
+                                let bg = if ours { BG_MINE } else { BG };
+                                let mut who = div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .items_baseline()
+                                    .when(!ours && !dm, |w| {
+                                        // mesh provenance marker on public log messages
+                                        w.child(
+                                            div().text_size(px(11.)).text_color(rgb(FG_DIM)).child("\u{25c8}"),
+                                        )
+                                    });
+                                let name_div = div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(ACCENT))
+                                    .font_weight(FontWeight::SEMIBOLD);
+                                if dm || ours {
+                                    who = who.child(name_div.child(sender.clone()));
+                                } else {
+                                    // Sender names are a shortcut into a
+                                    // private conversation.
+                                    let sender = sender.clone();
+                                    who = who.child(
+                                        name_div
+                                            .id(SharedString::from(format!("who-{sender}")))
+                                            .cursor_pointer()
+                                            .hover(|s| s.text_color(rgb(FG)))
+                                            .on_click({
+                                                let sender = sender.clone();
+                                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                    let resolved = this.store.update(cx, |store, _| {
+                                                        if store.nickname_or_id() == sender {
+                                                            None
+                                                        } else {
+                                                            store.resolve_peer(&sender)
+                                                        }
+                                                    });
+                                                    match resolved {
+                                                        Some((peer_id, name)) => {
+                                                            this.store.update(cx, |store, _| store.mark_dm_read(&peer_id));
+                                                            this.pane = Pane::Dm(peer_id, name);
+                                                            cx.notify();
+                                                        }
+                                                        None => this.store.update(cx, |store, _| {
+                                                            store.system_line(format!(
+                                                                "{sender} isn't on the mesh right now"
+                                                            ))
+                                                        }),
+                                                    }
+                                                })
+                                            })
+                                            .child(sender),
+                                    );
+                                }
+                                kids.push(
                                     div()
                                         .px_3()
                                         .py_1()
                                         .mr_2()
                                         .bg(rgb(bg))
                                         .rounded(px(6.))
-                                        .child(
+                                        .child(who.child(
                                             div()
-                                                .flex()
-                                                .flex_row()
-                                                .gap_2()
-                                                .items_baseline()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.))
-                                                        .text_color(rgb(ACCENT))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(dm.sender.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(11.))
-                                                        .text_color(rgb(FG_DIM))
-                                                        .child(format_time(dm.timestamp)),
-                                                ),
-                                        )
-                                        .child(div().text_size(px(14.)).child(dm.content.clone()))
-                                        .into_any_element()
-                                })
-                                .collect();
-                            if kids.is_empty() {
-                                kids.push(
-                                    div()
-                                        .px_3()
-                                        .text_size(px(12.))
-                                        .italic()
-                                        .text_color(rgb(FG_DIM))
-                                        .child(format!(
-                                            "private chat with {nick} — end-to-end encrypted (noise). the back arrow (or /back) returns to the mesh log"
+                                                .text_size(px(11.))
+                                                .text_color(rgb(FG_DIM))
+                                                .child(format_time(ts)),
                                         ))
+                                        .child(div().text_size(px(14.)).child(content))
                                         .into_any_element(),
                                 );
                             }
                             kids
                         }
-                        Pane::Log => lines
-                            .iter()
-                            .enumerate()
-                            .map(|(i, line)| match line {
-                                ChatLine::System { text } => div()
-                                    .px_3()
-                                    .text_size(px(12.))
-                                    .italic()
-                                    .text_color(rgb(FG_DIM))
-                                    .child(text.clone())
-                                    .into_any_element(),
-                                ChatLine::Message { sender, content, ours, timestamp } => {
-                                    let bg = if *ours { BG_MINE } else { BG };
-                                    let sender = sender.clone();
-                                    div()
-                                        .px_3()
-                                        .py_1()
-                                        .mr_2()
-                                        .bg(rgb(bg))
-                                        .rounded(px(6.))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .gap_2()
-                                                .items_baseline()
-                                                .child(
-                                                    // Sender names are a shortcut into
-                                                    // a private conversation.
-                                                    div()
-                                                        .id(SharedString::from(format!("who-{i}")))
-                                                        .text_size(px(12.))
-                                                        .text_color(rgb(ACCENT))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .cursor_pointer()
-                                                        .hover(|s| s.text_color(rgb(FG)))
-                                                        .on_click({
-                                                            let sender = sender.clone();
-                                                            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                                            let resolved = this.store.update(cx, |store, _| {
-                                                                if store.nickname_or_id() == sender {
-                                                                    None
-                                                                } else {
-                                                                    store.resolve_peer(&sender)
-                                                                }
-                                                            });
-                                                            match resolved {
-                                                                Some((peer_id, name)) => {
-                                                                    this.store.update(cx, |store, _| store.mark_dm_read(&peer_id));
-                                                                    this.pane = Pane::Dm(peer_id, name);
-                                                                    cx.notify();
-                                                                }
-                                                                None => this.store.update(cx, |store, _| {
-                                                                    store.system_line(format!("{sender} isn't on the mesh right now"))
-                                                                }),
-                                                            }
-                                                            })
-                                                        })
-                                                        .child(sender.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(11.))
-                                                        .text_color(rgb(FG_DIM))
-                                                        .child(format_time(*timestamp)),
-                                                ),
-                                        )
-                                        .child(
-                                            div().text_size(px(14.)).child(content.clone()),
-                                        )
-                                        .into_any_element()
-                                }
-                            })
-                            .collect::<Vec<_>>(),
                     }),
-            )
+                )
+                // Input row            )
+            // Slash menu: complete commands while the first word is being
+            // typed. Click a suggestion to fill the input.
+            .when(input_text.starts_with('/') && !input_text.contains(' '), |root| {
+                let typed = input_text.to_lowercase();
+                let matches: Vec<&str> = COMMANDS
+                    .iter()
+                    .copied()
+                    .filter(|c| c.starts_with(&typed))
+                    .collect();
+                if !matches.is_empty() {
+                    root.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_1()
+                            .px_3()
+                            .py_1()
+                            .bg(rgb(BG_HEADER))
+                            .children(matches.into_iter().map(|cmd| {
+                                div()
+                                    .id(SharedString::from(format!("cmd-{cmd}")))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded(px(6.))
+                                    .bg(rgb(BG))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(ACCENT))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(BG_MINE)))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        let fill = format!("{cmd} ");
+                                        this.input.update(cx, |input, _| input.set_text(&fill));
+                                        cx.notify();
+                                    }))
+                                    .child(cmd)
+                                    
+                            })),
+                    )
+                } else {
+                    root
+                }
+            })
             // Input row
             .child(
                 div()
@@ -575,8 +721,54 @@ impl Render for ChatView {
     }
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
+/// Centered, dim pill — a system notice is not a conversation turn.
+fn system_pill(text: String) -> gpui::Div {
+    div()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .px_2()
+                .py_0p5()
+                .my_0p5()
+                .rounded(px(8.))
+                .bg(rgb(BG_HEADER))
+                .text_size(px(11.))
+                .italic()
+                .text_color(rgb(FG_DIM))
+                .child(text),
+        )
+}
+
+/// Thin day separator between calendar days.
+fn day_divider(label: String) -> gpui::Div {
+    div().flex().justify_center().py_1().child(
+        div()
+            .px_2()
+            .rounded(px(8.))
+            .text_size(px(10.))
+            .text_color(rgb(FG_DIM))
+            .child(label),
+    )
+}
+
+/// Calendar-day label from a unix day number (no date crate; civil-from-days).
+fn day_label(day: i64) -> String {
+    let z = day + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!("{} {} {}", MONTHS[(m - 1) as usize], d, era * 400 + yoe as i64 + if m <= 2 { 1 } else { 0 })
+}
+
+fn now_secs() -> i64 {    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
@@ -586,4 +778,17 @@ fn now_secs() -> i64 {
 fn format_time(unix_secs: i64) -> String {
     let secs = unix_secs.rem_euclid(86400);
     format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_labels_land_on_the_right_calendar_day() {
+        assert_eq!(day_label(0), "Jan 1 1970");
+        assert_eq!(day_label(19_723), "Jan 1 2024"); // 54y incl. leap days
+        assert_eq!(day_label(20_741), "Oct 15 2026");
+        assert_eq!(day_label(20_742), "Oct 16 2026");
+    }
 }

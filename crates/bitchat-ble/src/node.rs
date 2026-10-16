@@ -155,6 +155,9 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                     link = match link::spawn(&link_config, true).await {
                         Ok(link) => {
                             last_inbound_ms = now_ms();
+                            let _ = events_tx
+                                .send(MeshEvent::RadioRestarted { heal: true })
+                                .await;
                             link
                         }
                         Err(e) => {
@@ -174,6 +177,9 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                         link = match link::spawn(&link_config, false).await {
                             Ok(link) => {
                                 last_inbound_ms = now_ms();
+                                let _ = events_tx
+                                    .send(MeshEvent::RadioRestarted { heal: false })
+                                    .await;
                                 link
                             }
                             Err(e) => {
