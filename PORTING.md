@@ -1,4 +1,4 @@
-# PORTING.md — tracking upstream bitchat
+# PORTING.md - tracking upstream bitchat
 
 Upstream: https://github.com/permissionlesstech/bitchat (Swift/SwiftUI, iOS/macOS)
 Snapshot this document was written against: `5e9287f`, 2026-09-24
@@ -12,9 +12,9 @@ diffing. When upstream changes, this file decides whether we care.
 
 Every upstream file is one of two things:
 
-1. **Wire-behavior** — defines bytes that must match what iOS/Android/other
+1. **Wire-behavior** - defines bytes that must match what iOS/Android/other
    clients put on the air. Changes here require porting.
-2. **Platform plumbing** — Swift/CoreBluetooth/Keychain/SwiftUI concerns.
+2. **Platform plumbing** - Swift/CoreBluetooth/Keychain/SwiftUI concerns.
    Changes here are ignored unless they reveal a protocol assumption.
 
 Section 2 files are only ever looked at when a section 1 file or a test
@@ -27,26 +27,26 @@ changes, to figure out *why*.
    a. Update `protocol/` notes (our mirror of the relevant spec section).
    b. Port changed/new test vectors into `fixtures/` (JSON, hex strings).
    c. Make `backchat-core` tests pass against the new fixtures.
-3. Diff `WHITEPAPER.md` — spec changes without code changes are still
+3. Diff `WHITEPAPER.md` - spec changes without code changes are still
    wire changes.
 4. Bump the snapshot hash in this file.
 5. If a *transport semantic* changed (TTL clamps, jitter ranges, dedup
-   windows, fanout rules), re-check `backchat-core::mesh` — these are
+   windows, fanout rules), re-check `backchat-core::mesh` - these are
    interop-relevant even though no byte format changes.
 
 ## Wire-behavior map
 
 Upstream path → what it defines → where it lands in backchat → fixtures.
 
-### localPackages/BitFoundation — the wire-format core (highest value)
+### localPackages/BitFoundation - the wire-format core (highest value)
 
 | Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `BinaryProtocol.swift` | packet header v1 (14 B) / v2 (16 B), flag bits, big-endian fields, zlib compression bit + original-size preamble, v2 source route encoding | `core::packet` | `BinaryProtocolTests`, `BinaryProtocolPaddingTests`, `PacketPayloadLimitsTests` |
-| `BitchatPacket.swift` | packet struct; signing representation (TTL=0, no signature, no RSR flag) | `core::packet` | — |
-| `MessageType.swift` | message type table (0x01–0x2C, incl. gaps: 0x05 recycled history) | `core::message_type` | — |
+| `BitchatPacket.swift` | packet struct; signing representation (TTL=0, no signature, no RSR flag) | `core::packet` | - |
+| `MessageType.swift` | message type table (0x01–0x2C, incl. gaps: 0x05 recycled history) | `core::message_type` | - |
 | `MessagePadding.swift` | noise frames only, PKCS#7-style, buckets 256/512/1024/2048, unpadded if >255 pad bytes | `core::padding` | `BinaryProtocolPaddingTests` |
-| `CompressionUtil.swift` | zlib "should compress > 256 bytes" policy | `core::compression` | — |
+| `CompressionUtil.swift` | zlib "should compress > 256 bytes" policy | `core::compression` | - |
 | `PeerID.swift` | prefixed hex peer IDs (`mesh:`, `noise:`, `nostr:`, `nostr_`, `group_`, `bridge:`), 8-byte mesh IDs = first 8 bytes of SHA-256 fingerprint of Noise static key | `core::peer_id` | `PeerIDTests` |
 | `PeerCapabilities.swift` | capability bit flags, canonical minimal encoding | `core::capabilities` | `PeerCapabilitiesTests` |
 | `PacketPayloadLimits.swift` | per-type payload ceilings, max deflate ratio | `core::limits` | `PacketPayloadLimitsTests` |
@@ -58,7 +58,7 @@ Upstream path → what it defines → where it lands in backchat → fixtures.
 
 | Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
-| `BitchatProtocol.swift` | `NoisePayloadType` table (first decrypted payload byte): 0x01 pm, 0x02 read receipt, 0x03 delivered, 0x06/0x07 group, 0x08 voice, 0x10/0x11 verify, 0x12 vouch, 0x20 privateFile (0x09 legacy alias: decode-only, never emit), 0x21 authenticatedPeerState | `core::noise_payload` | — |
+| `BitchatProtocol.swift` | `NoisePayloadType` table (first decrypted payload byte): 0x01 pm, 0x02 read receipt, 0x03 delivered, 0x06/0x07 group, 0x08 voice, 0x10/0x11 verify, 0x12 vouch, 0x20 privateFile (0x09 legacy alias: decode-only, never emit), 0x21 authenticatedPeerState | `core::noise_payload` | - |
 | `Packets.swift` | Announcement TLVs (0x01 nickname, 0x02 noise key, 0x03 signing key, 0x04 ≤10 neighbors, 0x05 capabilities, 0x06 bridge geohash; unknown TLVs skipped), `AuthenticatedPeerStatePacket` v1 (strict: rejects non-canonical), `PrivateMessagePacket` TLVs (0x00 id, 0x01 content) | `core::tlv` | `PacketsTests` |
 | `BitchatFilePacket.swift`, `NostrCarrierPacket.swift`, `BoardPackets.swift`, `VouchAttestation.swift`, `VoiceBurstPacket.swift` | later-milestone wire types | M4+ | matching tests in `bitchatTests/Protocols/` |
 | `Geohash.swift`, `LocationChannel.swift`, `MeshMessageIdentity.swift` | geohash channel naming/presence | `nostr::geohash` | `LocationChannelsTests` |
@@ -69,21 +69,21 @@ Upstream path → what it defines → where it lands in backchat → fixtures.
 |---|---|---|---|
 | `NoiseProtocol.swift` | `Noise_XX_25519_ChaChaPoly_SHA256` handshake, prologue construction, key derivation details | `core::noise` (wraps `snow`) | `NoiseTestVectors.json` (already snow/cacophony format) |
 | `NoiseSession.swift`, `NoiseSessionState.swift`, `SecureNoiseSession.swift` | session semantics: rekey, replay windows, nonce handling | `core::noise::session` | `NoiseCoverageTests` |
-| `NoiseSessionManager.swift` | session lifecycle, handshake initiation policy | `core::noise::manager` | — |
-| `NoiseRateLimiter.swift`, `NoiseSecurity*.swift` | abuse/security rails (behavioral, not wire) | port loosely | — |
+| `NoiseSessionManager.swift` | session lifecycle, handshake initiation policy | `core::noise::manager` | - |
+| `NoiseRateLimiter.swift`, `NoiseSecurity*.swift` | abuse/security rails (behavioral, not wire) | port loosely | - |
 | `../Services/NoiseEncryptionService.swift` | glues Noise to mesh; payload padding buckets | `core::noise` + `mesh` | `NoiseEncryptionTests` |
 
-### bitchat/Nostr — internet transport
+### bitchat/Nostr - internet transport
 
 | Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
-| `NostrEmbeddedBitChat.swift` | `bitchat1:` base64url embedding of whole `BitchatPacket`s (type noiseEncrypted, ttl 7); random unlinkable sender IDs for geohash DMs | `nostr::embedded` | — |
+| `NostrEmbeddedBitChat.swift` | `bitchat1:` base64url embedding of whole `BitchatPacket`s (type noiseEncrypted, ttl 7); random unlinkable sender IDs for geohash DMs | `nostr::embedded` | - |
 | Nostr private envelope (see whitepaper §5.3; kind 13 seal → 14 inner → 1059 envelope, one-time outer key) | `v2:` + base64url(24 B nonce ‖ XChaCha20-Poly1305 ct ‖ 16 B tag); keys from secp256k1 ECDH + HKDF-SHA256 reusing "nip44-v2" info label (NOT NIP-44) | `nostr::envelope` | `XChaCha20Poly1305CompatTests`, `bitchatTests/Nostr/Fixtures` |
-| `NostrIdentity.swift`, `NostrIdentityBridge.swift` | secp256k1 keys, npub/nsec, geohash ephemeral identities | `nostr::identity` | — |
+| `NostrIdentity.swift`, `NostrIdentityBridge.swift` | secp256k1 keys, npub/nsec, geohash ephemeral identities | `nostr::identity` | - |
 | `NostrPoW.swift`, `Base64URLCoding.swift`, `Bech32.swift` | encoding utilities | `nostr::` | respective tests |
 | `NostrRelayManager.swift`, `GeoRelayDirectory.swift` | relay selection, subscriptions, 24 h lookback | `nostr::relay` | `GeoRelayDirectoryTests` |
 
-### bitchat/Noise — session layer (M2)
+### bitchat/Noise - session layer (M2)
 
 | Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
@@ -101,19 +101,21 @@ Upstream path → what it defines → where it lands in backchat → fixtures.
 | `bitchat/Protocols/BitchatProtocol.swift:76` | NoisePayloadType byte INSIDE the noise plaintext (`[type][PrivateMessagePacket TLV]`) | `ble::engine::seal_private` |
 | `BLEService.swift` (dual role) | peripheral advertise + GATT write-without-response/notify AND central scan/connect on one adapter | `ble::link` (bluer) |
 
-Deliberate v1 deviations (documented in `ble::link`): all outbound frames
-flood every link (no per-peer link tables); fanout subsetting and TTL
-clamps are not ported yet. Gossip sync IS ported (responder side:
+Deliberate deviations (documented in `ble::link`): unicast frames route to
+a peer's learned central link when one exists (announces received on a
+central connection teach the peer-to-address table) and otherwise flood,
+as do all broadcasts; full per-peer link tables, fanout subsetting and
+TTL clamps are not ported yet. Gossip sync IS ported (responder side:
 `ble::engine::on_request_sync` keeps the latest accepted announce per
 peer plus a 500-packet broadcast-message ring, answers REQUEST_SYNC
-with those at TTL 0, directed routing only — we don't parse the
+with those at TTL 0, directed routing only - we don't parse the
 requester's GCS filter, dedup makes the extra sends harmless).
 
 Upstream's adaptive relay probability (PacketRelayManager, kicks in
-above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported — always
+above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported - always
 relay below that scale.
 
-### Mesh semantics (behavioral, no fixed bytes — but interop-relevant)
+### Mesh semantics (behavioral, no fixed bytes - but interop-relevant)
 
 | Upstream file | Defines |
 |---|---|
@@ -134,26 +136,26 @@ relay below that scale.
 Characteristic `A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D` carries all framed
 packets in both directions (phone writes → us; we notify → phone).
 `ble::link` implements exactly this pairing surface; iOS DEBUG builds
-advertise the TESTNET service UUID — pick the network with
+advertise the TESTNET service UUID - pick the network with
 `MeshConfig::network` if a phone pairs with nothing.
 
 ## Ignored by design (never port)
 
-- `Views/`, `ViewModels/`, `App/` — SwiftUI/GPUI territory
-- `Features/voice/`, `Features/media/` — M4+ at the earliest
-- `Services/KeychainManager.swift` — Linux uses file-backed keyring
-- `localPackages/Arti/` — Tor; consider later, Rust has `arti` crates
+- `Views/`, `ViewModels/`, `App/` - SwiftUI/GPUI territory
+- `Features/voice/`, `Features/media/` - M4+ at the earliest
+- `Services/KeychainManager.swift` - Linux uses file-backed keyring
+- `localPackages/Arti/` - Tor; consider later, Rust has `arti` crates
 - Everything under `bitchatShareExtension/`, `Configs/`, `scripts/`
 
 ## Fixture inventory (port first, in this order)
 
-1. `bitchatTests/Noise/NoiseTestVectors.json` — already in snow/cacophony
+1. `bitchatTests/Noise/NoiseTestVectors.json` - already in snow/cacophony
    JSON format; `snow`'s test harness consumes these nearly as-is.
-2. `bitchatTests/Protocols/PacketsTests.swift` — announce/PM TLV round-trips.
+2. `bitchatTests/Protocols/PacketsTests.swift` - announce/PM TLV round-trips.
 3. `localPackages/BitFoundation/Tests/BitFoundationTests/BinaryProtocolTests.swift`
-   + `BinaryProtocolPaddingTests.swift` — header/flag/padding golden bytes.
+   + `BinaryProtocolPaddingTests.swift` - header/flag/padding golden bytes.
 4. `bitchatTests/XChaCha20Poly1305CompatTests.swift` + `bitchatTests/Nostr/Fixtures`
-   — the private-envelope scheme.
+   - the private-envelope scheme.
 5. Everything else in `BitFoundationTests` as the modules land.
 
 Fixture format: keep upstream's hex-string JSON shape where possible so a

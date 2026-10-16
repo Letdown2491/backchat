@@ -38,6 +38,26 @@ pub const CHARACTERISTIC_UUID: Uuid =
 
 /// Upstream `bleMaxMTU`.
 pub const BLE_MAX_MTU: usize = 512;
+
+/// Per-packet radio logging is silent by default; set `BACKCHAT_DEBUG=1`
+/// to see every frame, notification, and transmit.
+pub fn debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var_os("BACKCHAT_DEBUG").is_some_and(|v| !v.is_empty())
+    })
+}
+
+/// Logs only when `BACKCHAT_DEBUG` is set (see [`debug_enabled`]).
+#[macro_export]
+macro_rules! radio_log {
+    ($($arg:tt)*) => {
+        if $crate::debug_enabled() {
+            eprintln!($($arg)*)
+        }
+    };
+}
 /// Upstream `bleDefaultFragmentSize`: payload chunk inside fragment packets.
 pub const BLE_DEFAULT_FRAGMENT_SIZE: usize = 469;
 /// Max ATT write on a 512 MTU link (MTU minus 3 ATT header bytes).

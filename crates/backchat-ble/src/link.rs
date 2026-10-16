@@ -2,11 +2,12 @@
 //! (scan + connect) on one adapter, mirroring upstream's dual-role
 //! `BLEService`.
 //!
-//! v1 simplification: every outbound frame is written to *all* live links
-//! (peripheral subscribers + connected remote devices). Unicast packets
-//! still carry their recipient in the wire header, so phones route them
-//! correctly; dedicated per-peer link tables are a later port of
-//! upstream's connection scheduler.
+//! Routing: broadcast frames flood every live link (peripheral subscribers
+//! + connected remote devices). Unicast frames (handshakes, DMs, sync
+//! responses) go straight to a peer's known central link when one was
+//! learned from its announces, falling back to the flood for peers only
+//! reachable as peripheral subscribers (upstream keeps full per-peer link
+//! tables; the flood fallback preserves that behavior where we can't tell).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -42,12 +43,28 @@ use futures::{pin_mut, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use backchat_core::message_type::MessageType;
+use backchat_core::packet::Packet;
+
 use crate::{MeshConfig, CHARACTERISTIC_UUID};
 
 /// Raw packet bytes destined for the radio (broadcast in v1).
 pub type OutboundTx = mpsc::Sender<Vec<u8>>;
 /// Raw packet bytes received from any radio path.
 pub type InboundTx = mpsc::Sender<Vec<u8>>;
+
+/// Shared link state: peripheral notify writers (one per subscribed
+/// central), connected remote devices (central role), and which mesh peer
+/// each central link speaks for (learned from announces, used to route
+/// unicast frames).
+struct Links {
+    writers: Vec<bluer::gatt::CharacteristicWriter>,
+    remotes: HashMap<bluer::Address, mpsc::Sender<Vec<u8>>>,
+    /// mesh peer id → the central address it was announced over.
+    peer_addr: HashMap<[u8; 8], bluer::Address>,
+    /// Reverse of `peer_addr`, for cleanup when a link ends.
+    addr_peer: HashMap<bluer::Address, [u8; 8]>,
+}
 
 /// A running link layer. Holds the live bluer handles (dropping the
 /// advertisement / GATT application handles *stops advertising* and
@@ -95,15 +112,11 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
 
     let service_uuid = config.network.service_uuid();
 
-    // Shared link state: peripheral notify writers (one per subscribed
-    // central) and connected remote devices (central role).
-    struct Links {
-        writers: Vec<bluer::gatt::CharacteristicWriter>,
-        remotes: HashMap<bluer::Address, mpsc::Sender<Vec<u8>>>,
-    }
     let links = std::sync::Arc::new(tokio::sync::Mutex::new(Links {
         writers: Vec::new(),
         remotes: HashMap::new(),
+        peer_addr: HashMap::new(),
+        addr_peer: HashMap::new(),
     }));
     // BlueZ runs one connection procedure at a time: concurrent Connect
     // calls fail with "In Progress".
@@ -253,14 +266,14 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                             // Upstream's BALANCED power profile threshold.
                             if let Ok(Some(rssi)) = device.rssi().await {
                                 if rssi < MIN_RSSI as i16 {
-                                    eprintln!(
+                                    crate::radio_log!(
                                         "{} discovery: peer at {} too weak ({rssi} dBm < {MIN_RSSI}): skipping",
                                         ts(), addr
                                     );
                                     continue;
                                 }
                             }
-                            eprintln!(
+                            crate::radio_log!(
                                 "{} discovery: bitchat peer at {} (name {:?}): connecting as central",
                                 ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
                             );
@@ -277,6 +290,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     service_uuid,
                                     &mut remote_rx,
                                     &inbound,
+                                    &links,
                                     &connect_lock,
                                     &wedge_failures,
                                 )
@@ -300,7 +314,13 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     blocked.insert(addr, now_ms);
                                 }
                                 eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
-                                links.lock().await.remotes.remove(&addr);
+                                let mut links = links.lock().await;
+                                links.remotes.remove(&addr);
+                                // The peer routing entry dies with its link;
+                                // the next announce re-learns it.
+                                if let Some(peer) = links.addr_peer.remove(&addr) {
+                                    links.peer_addr.remove(&peer);
+                                }
                             });
                         }
                         AdapterEvent::DeviceRemoved(_) => {}
@@ -323,20 +343,41 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         let mut outbound_rx = outbound_rx;
         while let Some(bytes) = outbound_rx.recv().await {
             let mut links = links.lock().await;
-            eprintln!(
+            crate::radio_log!(
                 "{} transmit: {} bytes → {} peripheral subscriber(s), {} central link(s)",
                 ts(), bytes.len(), links.writers.len(), links.remotes.len()
             );
+            // Unicast frames (handshakes, DMs, sync responses) go straight
+            // to the peer's known central link when we have one, instead of
+            // flooding every radio path. Unknown or peripheral-side peers
+            // still flood (their writers can't be correlated today).
+            if let Some(addr) = route_for(
+                Packet::decode(&bytes).ok().and_then(|p| p.recipient_id),
+                &links.peer_addr,
+                &links.remotes,
+            ) {
+                if let Some(remote) = links.remotes.get(&addr) {
+                    match remote.try_send(bytes.clone()) {
+                        Ok(()) => {
+                            crate::radio_log!("{} transmit: routed unicast to {addr}", ts());
+                            continue;
+                        }
+                        Err(e) => {
+                            crate::radio_log!("{} transmit: unicast route {addr} full ({e}): flooding", ts());
+                        }
+                    }
+                }
+            }
             let mut dead = Vec::new();
             for (i, writer) in links.writers.iter_mut().enumerate() {
                 match tokio::time::timeout(Duration::from_secs(5), writer.write_all(&bytes)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        eprintln!("{} transmit: peripheral write failed: {e}", ts());
+                        crate::radio_log!("{} transmit: peripheral write failed: {e}", ts());
                         dead.push(i);
                     }
                     Err(_) => {
-                        eprintln!("{} transmit: peripheral write stalled >5s: dropping subscriber", ts());
+                        crate::radio_log!("{} transmit: peripheral write stalled >5s: dropping subscriber", ts());
                         dead.push(i);
                     }
                 }
@@ -346,7 +387,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
             }
             for remote in links.remotes.values() {
                 if let Err(e) = remote.try_send(bytes.clone()) {
-                    eprintln!("{} transmit: central write failed: {e}", ts());
+                    crate::radio_log!("{} transmit: central write failed: {e}", ts());
                 }
             }
         }
@@ -363,13 +404,53 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     })
 }
 
+/// Record which mesh peer a remote link speaks for, from announce packets
+/// only (relayed packets carry a third party's sender id and would map the
+/// wrong peer). Never blocks: if the transmit pump holds the table lock,
+/// the next announce (15 s cadence) re-learns the mapping.
+fn learn_peer(
+    bytes: &[u8],
+    addr: bluer::Address,
+    links: &std::sync::Arc<tokio::sync::Mutex<Links>>,
+) {
+    let Ok(packet) = Packet::decode(bytes) else { return };
+    if packet.kind != MessageType::Announce as u8 || packet.recipient_id.is_some() {
+        return;
+    }
+    let Ok(mut links) = links.try_lock() else { return };
+    let peer = packet.sender_id;
+    if let Some(old_peer) = links.addr_peer.insert(addr, peer) {
+        if old_peer != peer {
+            links.peer_addr.remove(&old_peer);
+        }
+    }
+    if let Some(old_addr) = links.peer_addr.insert(peer, addr) {
+        if old_addr != addr && links.addr_peer.get(&old_addr) == Some(&peer) {
+            links.addr_peer.remove(&old_addr);
+        }
+    }
+}
+
+/// Which central link (if any) carries a unicast frame for this recipient?
+/// Some only when the peer announced over a still-live central link.
+fn route_for(
+    recipient: Option<[u8; 8]>,
+    peer_addr: &HashMap<[u8; 8], bluer::Address>,
+    remotes: &HashMap<bluer::Address, mpsc::Sender<Vec<u8>>>,
+) -> Option<bluer::Address> {
+    let addr = peer_addr.get(&recipient?)?;
+    remotes.contains_key(addr).then_some(*addr)
+}
+
 /// Central-role connection to one remote device: acquire write-without-
 /// response IO + notifications, then pump both directions until it goes away.
+#[allow(clippy::too_many_arguments)]
 async fn run_remote(
     device: &bluer::Device,
     service_uuid: uuid::Uuid,
     outbound_rx: &mut mpsc::Receiver<Vec<u8>>,
     inbound_tx: &InboundTx,
+    links: &std::sync::Arc<tokio::sync::Mutex<Links>>,
     connect_lock: &tokio::sync::Mutex<()>,
     wedge_failures: &std::sync::atomic::AtomicU32,
 ) -> bluer::Result<()> {
@@ -490,7 +571,8 @@ async fn run_remote(
             value = notify.next() => {
                 match value {
                     Some(bytes) => {
-                        eprintln!("{} remote {}: notification ({} bytes)", ts(), device.address(), bytes.len());
+                        crate::radio_log!("{} remote {}: notification ({} bytes)", ts(), device.address(), bytes.len());
+                        learn_peer(&bytes, device.address(), links);
                         if inbound_tx.send(bytes).await.is_err() {
                             return Ok(());
                         }
@@ -510,13 +592,45 @@ async fn run_remote(
                         };
                         match result {
                             Ok(true) => {}
-                            Ok(false) => eprintln!("{} remote {}: short write", ts(), device.address()),
-                            Err(e) => eprintln!("{} remote {}: write FAILED: {e}", ts(), device.address()),
+                            Ok(false) => crate::radio_log!("{} remote {}: short write", ts(), device.address()),
+                            Err(e) => crate::radio_log!("{} remote {}: write FAILED: {e}", ts(), device.address()),
                         }
                     }
                     None => return Ok(()),
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr() -> bluer::Address {
+        "AA:BB:CC:DD:EE:FF".parse().unwrap()
+    }
+
+    fn live_remotes() -> HashMap<bluer::Address, mpsc::Sender<Vec<u8>>> {
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        HashMap::from([(addr(), tx)])
+    }
+
+    #[test]
+    fn unicast_frames_route_to_a_known_live_link() {
+        let peer = [7u8; 8];
+        let peer_addr = HashMap::from([(peer, addr())]);
+        let remotes = live_remotes();
+
+        // Known peer with a live link: routed.
+        assert_eq!(route_for(Some(peer), &peer_addr, &remotes), Some(addr()));
+        // Unknown peer, broadcasts, and handoff frames: flood.
+        assert_eq!(route_for(Some([9u8; 8]), &peer_addr, &remotes), None);
+        assert_eq!(route_for(None, &peer_addr, &remotes), None);
+
+        // Link died since the announce: fall back to flooding.
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        let remotes = HashMap::from([(bluer::Address::new([1, 2, 3, 4, 5, 6]), tx)]);
+        assert_eq!(route_for(Some(peer), &peer_addr, &remotes), None);
     }
 }

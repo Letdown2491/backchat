@@ -10,9 +10,12 @@ use crate::input::{Submit, TextInput};
 use crate::store::{ChatLine, ChatStore, PersonRow};
 use backchat_ble::engine::MeshEvent;
 use backchat_nostr::relay::RelayEvent;
+use std::rc::Rc;
+
 use gpui::{
-    div, prelude::*, px, rgb, AnyElement, App, ClickEvent, Context, Entity, Focusable, FontWeight,
-    ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
+    div, list, prelude::*, px, rgb, AnyElement, App, ClickEvent, Context, Entity, Focusable,
+    FontWeight, ListAlignment, ListState, ParentElement, Render, ScrollHandle, SharedString,
+    Styled, Window,
 };
 
 // ---- palette: dark surfaces + one hue per transport ----------------------
@@ -52,9 +55,12 @@ impl Space {
 pub struct ChatView {
     store: Entity<ChatStore>,
     input: Entity<TextInput>,
-    /// Plain scrollable log (no virtualization: uniform_list assumes equal
-    /// item heights and clips message bodies).
-    log_scroll: ScrollHandle,
+    /// Virtualized log (gpui `list`): only visible rows are built and
+    /// text-shaped, so a thousand-line history costs the same per frame as
+    /// a screenful.
+    log_list: ListState,
+    /// The channel browser is a handful of rows; a plain scroller is fine.
+    browse_scroll: ScrollHandle,
     space: Space,
     last_count: usize,
     last_space: Space,
@@ -149,7 +155,8 @@ impl ChatView {
         Self {
             store,
             input,
-            log_scroll: ScrollHandle::new(),
+            log_list: ListState::new(0, ListAlignment::Top, px(256.)),
+            browse_scroll: ScrollHandle::new(),
             space: Space::Nearby,
             last_count: 0,
             last_space: Space::Nearby,
@@ -298,13 +305,16 @@ impl Render for ChatView {
         } else {
             // Follow the tail only when the reader is at the bottom, or just
             // switched spaces / left the browser; never yank someone reading
-            // history.
+            // history. Offsets are from the last paint, before the splice.
             let count = lines.len();
-            let at_bottom =
-                self.log_scroll.offset().y >= self.log_scroll.max_offset().height - px(2.0);
+            let at_bottom = self.log_list.scroll_px_offset_for_scrollbar().y
+                >= self.log_list.max_offset_for_scrollbar().height - px(2.0);
             let switched = self.last_space != space || self.last_browsing != browsing;
-            if count > 0 && (switched || (count != self.last_count && at_bottom)) {
-                self.log_scroll.scroll_to_item(count - 1);
+            let grew = count != self.last_count;
+            // Refresh cached row heights for anything that changed.
+            self.log_list.splice(0..self.last_count, count);
+            if count > 0 && (switched || (grew && at_bottom)) {
+                self.log_list.scroll_to_reveal_item(count - 1);
             }
             self.last_count = count;
             self.last_space = space.clone();
@@ -562,23 +572,44 @@ impl Render for ChatView {
                                     .child(meta),
                             ),
                     )
-                    // conversation (or channel browser)
-                    .child(
+                    // conversation (or channel browser): the log is a
+                    // virtualized list; the browser is a plain scroller
+                    .child(if browsing {
                         div()
                             .id("log")
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
-                            .track_scroll(&self.log_scroll)
+                            .track_scroll(&self.browse_scroll)
                             .flex()
                             .flex_col()
                             .py_3()
-                            .children(if browsing {
-                                self.render_browse(cx)
-                            } else {
-                                self.render_space(&space, lines, cx)
-                            }),
-                    )
+                            .children(self.render_browse(cx))
+                            .into_any_element()
+                    } else {
+                        match self.empty_panel(&space, &lines, cx) {
+                            Some(panel) => div()
+                                .flex_1()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .py_3()
+                                .children(panel)
+                                .into_any_element(),
+                            None => {
+                                let lines = Rc::new(lines);
+                                let hue = space.hue();
+                                div().flex_1().min_h_0().py_3().child(list(
+                                    self.log_list.clone(),
+                                    move |ix, _window, _cx| {
+                                        chat_row(&lines, ix, hue)
+                                            .unwrap_or_else(|| div().into_any_element())
+                                    },
+                                ))
+                                .into_any_element()
+                            }
+                        }
+                    })
                     // slash menu
                     .when(input_text.starts_with('/') && !input_text.contains(' '), |root| {
                         let typed = input_text.to_lowercase();
@@ -853,14 +884,17 @@ impl ChatView {
     /// The active space's conversation: day-separated rows with per-space
     /// styling (mine right-aligned bubbles, theirs clean lines) and designed
     /// empty states.
-    fn render_space(
-    &self,
-    space: &Space,
-    lines: Vec<ChatLine>,
-    cx: &mut Context<Self>,
-) -> Vec<AnyElement> {
-    // Empty states first.
-    if lines.is_empty() || lines.iter().all(|l| matches!(l, ChatLine::System { .. })) {
+    /// The empty-state intro for a space with no real messages yet. Returns
+    /// None when the log has rows for the virtualized list.
+    fn empty_panel(
+        &self,
+        space: &Space,
+        lines: &[ChatLine],
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<AnyElement>> {
+        if lines.iter().any(|l| matches!(l, ChatLine::Message { .. })) {
+            return None;
+        }
         let empty: Vec<(&str, String, String)> = match space {
             Space::Nearby => vec![
                 ("\u{25c7}", "mesh".into(), "everyone in bluetooth range, right now".into()),
@@ -885,152 +919,40 @@ impl ChatView {
                 ("", "only you two can read these".into(), String::new()),
             ],
         };
-        return empty
-            .into_iter()
-            .map(|(glyph, title, hint)| {
-                div()
-                    .px_5()
-                    .py_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(space.hue()))
-                                    .child(if glyph.is_empty() {
-                                        title.clone()
-                                    } else {
-                                        format!("{glyph} {title}")
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(DIM))
-                                    .child(hint.to_string()),
-                            ),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-    }
-
-    let mut kids: Vec<AnyElement> = Vec::new();
-    let mut last_day: Option<i64> = None;
-    for line in lines {
-        match line {
-            ChatLine::System { text } => {
-                kids.push(
+        Some(
+            empty
+                .into_iter()
+                .map(|(glyph, title, hint)| {
                     div()
-                        .flex()
-                        .justify_center()
-                        .py_0p5()
+                        .px_5()
+                        .py_1()
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .italic()
-                                .text_color(rgb(DIM))
-                                .child(text),
-                        )
-                        .into_any_element(),
-                );
-            }
-            ChatLine::Message { sender, content, ours, timestamp } => {
-                if timestamp > 0 {
-                    let day = timestamp / 86_400;
-                    if last_day != Some(day) {
-                        last_day = Some(day);
-                        kids.push(
-                            div()
                                 .flex()
-                                .justify_center()
-                                .py_2()
+                                .flex_col()
+                                .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(DIM))
-                                        .child(day_label(day)),
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(space.hue()))
+                                        .child(if glyph.is_empty() {
+                                            title.clone()
+                                        } else {
+                                            format!("{glyph} {title}")
+                                        }),
                                 )
-                                .into_any_element(),
-                        );
-                    }
-                }
-                let body = div()
-                    .text_size(px(14.))
-                    .child(content.clone());
-                if ours {
-                    kids.push(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .px_5()
-                            .py_0p5()
-                            .child(
-                                div()
-                                    .max_w(px(420.))
-                                    .px_3()
-                                    .py_1p5()
-                                    .rounded(px(12.))
-                                    .bg(rgb(RAISED))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_0p5()
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(space.hue()))
-                                                    .child("you"),
-                                            )
-                                            .child(body),
-                                    ),
-                            )
-                            .into_any_element(),
-                    );
-                } else {
-                    kids.push(
-                        div()
-                            .px_5()
-                            .py_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_baseline()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(rgb(space.hue()))
-                                                    .child(sender.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(DIM))
-                                                    .child(format_time(timestamp)),
-                                            ),
-                                    )
-                                    .child(body),
-                            )
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-    }
-    kids
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(DIM))
+                                        .child(hint.to_string()),
+                                ),
+                        )
+                        .into_any_element()
+                })
+                .collect(),
+        )
     }
 
     /// The channel browser: three sections (location ladder, your
@@ -1156,5 +1078,119 @@ mod tests {
         assert_eq!(day_label(19_723), "Jan 1 2024"); // 54y incl. leap days
         assert_eq!(day_label(20_741), "Oct 15 2026");
         assert_eq!(day_label(20_742), "Oct 16 2026");
+    }
+}
+
+/// One virtualized log row (and its day separator when the day changed): a
+/// pure function of the line slice and the space hue, so gpui's list can
+/// build rows lazily instead of every frame.
+fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
+    let line = lines.get(ix)?;
+    match line {
+        ChatLine::System { text } => Some(
+            div()
+                .flex()
+                .justify_center()
+                .py_0p5()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .italic()
+                        .text_color(rgb(DIM))
+                        .child(text.clone()),
+                )
+                .into_any_element(),
+        ),
+        ChatLine::Message { sender, content, ours, timestamp } => {
+            let mut row = div().flex().flex_col();
+            if *timestamp > 0 {
+                let day = timestamp / 86_400;
+                let prev_day = lines[..ix].iter().rev().find_map(|l| match l {
+                    ChatLine::Message { timestamp, .. } if *timestamp > 0 => {
+                        Some(timestamp / 86_400)
+                    }
+                    _ => None,
+                });
+                if prev_day != Some(day) {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .justify_center()
+                            .py_2()
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(DIM))
+                                    .child(day_label(day)),
+                            ),
+                    );
+                }
+            }
+            let body = div().text_size(px(14.)).child(content.clone());
+            if *ours {
+                row = row.child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .px_5()
+                        .py_0p5()
+                        .child(
+                            div()
+                                .max_w(px(420.))
+                                .px_3()
+                                .py_1p5()
+                                .rounded(px(12.))
+                                .bg(rgb(RAISED))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(hue))
+                                                .child("you"),
+                                        )
+                                        .child(body),
+                                ),
+                        ),
+                );
+            } else {
+                row = row.child(
+                    div()
+                        .px_5()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_baseline()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(hue))
+                                                .child(sender.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(DIM))
+                                                .child(format_time(*timestamp)),
+                                        ),
+                                )
+                                .child(body),
+                        ),
+                );
+            }
+            Some(row.into_any_element())
+        }
     }
 }

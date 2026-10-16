@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn join_derives_persona_and_subscribes() {
-        let mut store = store_with_channel();
+        let store = store_with_channel();
         assert_eq!(store.geohash.as_deref(), Some("dr5rs"));
         assert!(store.persona.is_some());
         // The join produced a channel notice and a presence publish.
