@@ -734,21 +734,41 @@ async fn run_remote(
     // the connect came through a coalesced bluetoothd attempt the
     // resolution can lag by several seconds.
     let mut characteristic = None;
+    let mut resolved_misses = 0u32;
     for attempt in 0..30 {
-        for service in device.services().await? {
+        let services = device.services().await?;
+        let mut found = None;
+        for service in &services {
             if service.uuid().await? != service_uuid {
                 continue;
             }
             for char in service.characteristics().await? {
                 if char.uuid().await? == CHARACTERISTIC_UUID {
-                    characteristic = Some(char);
+                    found = Some(char);
                     break;
                 }
             }
-            if characteristic.is_some() { break; }
+            if found.is_some() { break; }
         }
-        if characteristic.is_some() {
+        if let Some(char) = found {
+            characteristic = Some(char);
             break;
+        }
+        if !services.is_empty() {
+            // The db resolved without our service: the peer accepts
+            // connections but its mesh app is not serving GATT right now
+            // (phone with the app closed or backgrounded). Waiting longer
+            // cannot help, and holding the connection would keep our own
+            // advertisement down.
+            resolved_misses += 1;
+            if resolved_misses >= 4 {
+                eprintln!(
+                    "{} remote {}: peer resolved {} services but none serves the mesh: releasing the link",
+                    ts(), device.address(), services.len()
+                );
+                let _ = tokio::time::timeout(Duration::from_secs(5), device.disconnect()).await;
+                return Ok(());
+            }
         }
         if attempt % 4 == 3 {
             let mut resolved: Vec<String> = Vec::new();
@@ -764,6 +784,7 @@ async fn run_remote(
     }
     let Some(characteristic) = characteristic else {
         eprintln!("{} remote {}: characteristic never appeared: giving up", ts(), device.address());
+        let _ = tokio::time::timeout(Duration::from_secs(5), device.disconnect()).await;
         return Ok(());
     };
     eprintln!("{} remote {}: characteristic found", ts(), device.address());
