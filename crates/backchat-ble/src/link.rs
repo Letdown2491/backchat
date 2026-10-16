@@ -16,10 +16,15 @@ use std::time::Duration;
 const MAX_CENTRAL_LINKS: usize = 8;
 /// Skip peers weaker than this (upstream BALANCED power profile).
 const MIN_RSSI: i32 = -85;
-/// Don't reconnect to an address whose link ended in failure for this long.
-/// Stale RPAs from bystander devices rotate on their own; this just stops
-/// us from hammering a dying connection over and over.
+/// Don't reconnect to an address whose link ended in a hard failure for
+/// this long. Stale RPAs from bystander devices rotate on their own; this
+/// just stops us from hammering a dying connection over and over.
 const CONNECT_BACKOFF_MS: u64 = 5 * 60_000;
+/// A busy BlueZ rejects connects with "In Progress" / "Busy" while another
+/// procedure (a disconnect winding down, an LE scan hop, another client's
+/// connect) is still running. That is transient: short cooldown, no wedge
+/// counting, and discovery re-finds the peer seconds later.
+const TRANSIENT_BACKOFF_MS: u64 = 15_000;
 /// Max remembered failed addresses (RPA churn from bystander devices is
 /// otherwise unbounded over long runs).
 const MAX_BLOCKED_ADDRESSES: usize = 128;
@@ -239,8 +244,8 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                 .unwrap_or(0);
                             {
                                 let mut blocked = blocked.lock().await;
-                                if let Some(&failed_at) = blocked.get(&addr) {
-                                    if now_ms.saturating_sub(failed_at) < CONNECT_BACKOFF_MS {
+                                if let Some(&until) = blocked.get(&addr) {
+                                    if now_ms < until {
                                         continue;
                                     }
                                     blocked.remove(&addr);
@@ -295,14 +300,38 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     &wedge_failures,
                                 )
                                 .await;
-                                if result.is_err() {
-                                    // Record the failure time for the backoff.
+                                if let Err(ref err) = result {
+                                    // Classify the failure: a busy BlueZ
+                                    // ("In Progress", "Busy") is transient, a
+                                    // silent adapter (D-Bus timeouts, NotReady)
+                                    // suggests a wedge, everything else is a
+                                    // hard failure for this address.
+                                    let msg = err.to_string();
+                                    let (wedge, cooldown) = if msg.contains("InProgress")
+                                        || msg.contains("Busy")
+                                    {
+                                        (false, TRANSIENT_BACKOFF_MS)
+                                    } else if msg.contains("Timeout")
+                                        || msg.contains("NotReady")
+                                    {
+                                        (true, CONNECT_BACKOFF_MS)
+                                    } else {
+                                        (false, CONNECT_BACKOFF_MS)
+                                    };
+                                    if wedge {
+                                        // The node watches this counter with
+                                        // inbound silence and power-cycles.
+                                        wedge_failures
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as u64)
                                         .unwrap_or(0);
                                     let mut blocked = blocked.lock().await;
-                                    if !blocked.contains_key(&addr) && blocked.len() >= MAX_BLOCKED_ADDRESSES {
+                                    if !blocked.contains_key(&addr)
+                                        && blocked.len() >= MAX_BLOCKED_ADDRESSES
+                                    {
                                         if let Some(oldest) = blocked
                                             .iter()
                                             .min_by_key(|(_, t)| **t)
@@ -311,9 +340,13 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                             blocked.remove(&oldest);
                                         }
                                     }
-                                    blocked.insert(addr, now_ms);
+                                    blocked.insert(addr, now_ms + cooldown);
                                 }
-                                eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
+                                if let Err(ref err) = result {
+                                    eprintln!("{} remote {}: link ended: {err}", ts(), device.address());
+                                } else {
+                                    eprintln!("{} remote {}: link ended: connected session finished", ts(), device.address());
+                                }
                                 let mut links = links.lock().await;
                                 links.remotes.remove(&addr);
                                 // The peer routing entry dies with its link;
@@ -461,27 +494,18 @@ async fn run_remote(
         eprintln!("{} remote {}: connecting", ts(), device.address());
         if !device.is_connected().await? {
             let mut retries = 3;
+            let mut backoff = 700u64;
             loop {
                 match device.connect().await {
                     Ok(()) => break,
                     Err(err) if retries > 0 => {
                         eprintln!("{} remote {}: connect failed ({err}), retrying", ts(), device.address());
                         retries -= 1;
-                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        tokio::time::sleep(Duration::from_millis(backoff)).await;
+                        backoff *= 2;
                     }
                     Err(err) => {
                         eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
-                        // D-Bus timeouts / NotReady while the radio is otherwise
-                        // silent indicate the adapter is wedged (zombie LE
-                        // connections from a killed client). The node watches
-                        // this counter together with inbound silence.
-                        let msg = err.to_string();
-                        if msg.contains("Timeout")
-                            || msg.contains("NotReady")
-                            || msg.contains("InProgress")
-                        {
-                            wedge_failures.fetch_add(1, Ordering::Relaxed);
-                        }
                         return Err(err);
                     }
                 }
