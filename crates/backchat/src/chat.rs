@@ -389,7 +389,7 @@ impl Render for ChatView {
                             .text_size(px(13.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(TEXT))
-                            .child("backchat"),
+                            .child("Backchat"),
                     )
                     // spaces
                     .child(space_row(
@@ -411,31 +411,86 @@ impl Render for ChatView {
                             cx.notify();
                         }),
                     ))
-                    .child(space_row(
-                        "channel",
-                        &match &geohash {
-                            Some(g) => format!("#{g}"),
-                            None => "# join a channel".to_string(),
-                        },
-                        RELAY,
-                        space == Space::Channel,
-                        Some(match &geohash {
-                            Some(_) => format!("{here}"),
-                            None => "+".to_string(),
-                        }),
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.space = Space::Channel;
-                            let joined = this.store.read(cx).geohash.is_some();
-                            if joined {
-                                this.browsing = false;
-                                this.store.update(cx, |store, _| store.end_browse());
-                            } else {
-                                this.store.update(cx, |store, _| store.begin_browse());
-                                this.browsing = true;
+                    .children({
+                        // Up to five channel rows: the current one first,
+                        // then recently visited cells from history.
+                        let mut chans: Vec<String> = Vec::new();
+                        if let Some(g) = &geohash {
+                            chans.push(g.clone());
+                        }
+                        let history: Vec<String> = self
+                            .store
+                            .read(cx)
+                            .channel_history()
+                            .iter()
+                            .map(|m| m.geohash.clone())
+                            .collect();
+                        for gh in history {
+                            if chans.len() >= 5 {
+                                break;
                             }
-                            cx.notify();
-                        }),
-                    ))
+                            if !chans.contains(&gh) {
+                                chans.push(gh);
+                            }
+                        }
+                        let rows: Vec<gpui::AnyElement> = chans
+                            .iter()
+                            .map(|gh| {
+                                let current = Some(gh.as_str()) == geohash.as_deref();
+                                let selected = current && !browsing;
+                                space_row(
+                                    &format!("ch-{gh}"),
+                                    &format!("#{gh}"),
+                                    RELAY,
+                                    selected,
+                                    if current { Some(format!("{here}")) } else { None },
+                                    {
+                                        let gh = gh.clone();
+                                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            this.space = Space::Channel;
+                                            if current {
+                                                // Re-clicking the channel you're
+                                                // in opens discovery.
+                                                this.store
+                                                    .update(cx, |store, _| store.begin_browse());
+                                                this.browsing = true;
+                                            } else {
+                                                this.store.update(cx, |store, _| store.join(&gh));
+                                                this.browsing = false;
+                                            }
+                                            cx.notify();
+                                        })
+                                    },
+                                )
+                                .into_any_element()
+                            })
+                            .collect();
+                        // Keep the browser reachable when there's room.
+                        if chans.len() < 5 {
+                            let mut rows = rows;
+                            rows.push(space_row(
+                                    "discover",
+                                    &if chans.is_empty() {
+                                        "# join a channel".to_string()
+                                    } else {
+                                        "+ discover".to_string()
+                                    },
+                                    RELAY,
+                                    browsing,
+                                    None,
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.space = Space::Channel;
+                                        this.store.update(cx, |store, _| store.begin_browse());
+                                        this.browsing = true;
+                                        cx.notify();
+                                    }),
+                            )
+                            .into_any_element());
+                            rows
+                        } else {
+                            rows
+                        }
+                    })
                     // people
                     .child(
                         div()

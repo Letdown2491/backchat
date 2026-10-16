@@ -4,6 +4,10 @@
   "relays": [],
   "channels": [
     {
+      "geohash": "9mubg",
+      "last_seen": 1792128183
+    },
+    {
       "geohash": "9xj6",
       "last_seen": 1792127775
     },
@@ -14,10 +18,6 @@
     {
       "geohash": "9x",
       "last_seen": 1792127691
-    },
-    {
-      "geohash": "9mubg",
-      "last_seen": 1792127619
     }
   ]
 }
