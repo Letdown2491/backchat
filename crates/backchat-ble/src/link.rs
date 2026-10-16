@@ -30,6 +30,11 @@ const TRANSIENT_BACKOFF_MS: u64 = 15_000;
 /// Max remembered failed addresses (RPA churn from bystander devices is
 /// otherwise unbounded over long runs).
 const MAX_BLOCKED_ADDRESSES: usize = 128;
+/// Bound one central connect attempt. bluetoothd's Connect() waits for the
+/// peer's advertisement before issuing the LE connection command and never
+/// times out at the D-Bus layer; a stale RPA (phones rotate every ~15 min)
+/// would otherwise wedge the serialized connect slot indefinitely.
+const CONNECT_TIMEOUT_SECS: u64 = 20;
 
 fn ts() -> String {
     let ms = std::time::SystemTime::now()
@@ -297,6 +302,15 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 return;
             }
             loop {
+                // bluetoothd finds a connect target with its own triggered
+                // scan, then issues the LE connection command. A discovery
+                // restart in the middle (the MGMT stop + start cycle) tears
+                // that down, so the pending connect never completes and no
+                // LE Create Connection ever reaches the controller. Don't
+                // churn discovery while any connect procedure is in flight.
+                while connect_lock.try_lock().is_err() {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
                 let events = match adapter.discover_devices().await {
                     Ok(events) => events,
                     Err(_) => return,
@@ -595,20 +609,51 @@ async fn run_remote(
         let _guard = connect_lock.lock().await;
         eprintln!("{} remote {}: connecting", ts(), device.address());
         if !device.is_connected().await? {
-            let mut retries = 3;
+            // bluer's connect() is a bare D-Bus call with no timeout: when
+            // the sighting's RPA rotates away (phones do, every ~15 min)
+            // bluetoothd waits for the device to advertise again forever
+            // and never replies, wedging the serialized connect slot for
+            // everyone. Bound each attempt; bluetoothd's Disconnect cancels
+            // a pending Connect, so clean up the zombie attempt too.
+            let mut retries = 2;
             let mut backoff = 700u64;
             loop {
-                match device.connect().await {
-                    Ok(()) => break,
-                    Err(err) if retries > 0 => {
+                let attempt = tokio::time::timeout(
+                    Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                    device.connect(),
+                )
+                .await;
+                match attempt {
+                    Ok(Ok(())) => break,
+                    Ok(Err(err)) if retries > 0 => {
                         eprintln!("{} remote {}: connect failed ({err}), retrying", ts(), device.address());
                         retries -= 1;
                         tokio::time::sleep(Duration::from_millis(backoff)).await;
                         backoff *= 2;
                     }
-                    Err(err) => {
+                    Ok(Err(err)) => {
                         eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
                         return Err(err);
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "{} remote {}: connect timed out after {CONNECT_TIMEOUT_SECS}s (address stale or peer not advertising), cancelling",
+                            ts(), device.address()
+                        );
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            device.disconnect(),
+                        ).await;
+                        if retries > 0 {
+                            retries -= 1;
+                            tokio::time::sleep(Duration::from_millis(backoff)).await;
+                            backoff *= 2;
+                            continue;
+                        }
+                        return Err(bluer::Error::from(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "connect timed out",
+                        )));
                     }
                 }
             }
@@ -618,9 +663,11 @@ async fn run_remote(
     eprintln!("{} remote {}: connected", ts(), device.address());
 
     // Locate the characteristic. Right after connect() the remote GATT db
-    // is sometimes not yet resolved: retry briefly before giving up.
+    // is sometimes not yet resolved: retry briefly before giving up. When
+    // the connect came through a coalesced bluetoothd attempt the
+    // resolution can lag by several seconds.
     let mut characteristic = None;
-    for attempt in 0..10 {
+    for attempt in 0..30 {
         for service in device.services().await? {
             if service.uuid().await? != service_uuid {
                 continue;
@@ -636,7 +683,16 @@ async fn run_remote(
         if characteristic.is_some() {
             break;
         }
-        eprintln!("{} remote {}: service not resolved yet (attempt {})", ts(), device.address(), attempt);
+        if attempt % 4 == 3 {
+            let mut resolved: Vec<String> = Vec::new();
+            for s in device.services().await.unwrap_or_default() {
+                resolved.push(s.uuid().await.unwrap_or_default().to_string());
+            }
+            eprintln!(
+                "{} remote {}: service not resolved yet (attempt {}): resolved services: {resolved:?}",
+                ts(), device.address(), attempt
+            );
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let Some(characteristic) = characteristic else {
