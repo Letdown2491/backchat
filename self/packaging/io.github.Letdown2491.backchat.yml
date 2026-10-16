@@ -1,0 +1,49 @@
+id: io.github.Letdown2491.backchat
+runtime: org.freedesktop.Platform
+runtime-version: "25.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: backchat
+
+finish-args:
+  # windowing: wayland primary, X11 fallback
+  - --socket=wayland
+  - --socket=x11
+  - --device=dri
+  # nostr relays (websockets)
+  - --share=network
+  # BLE mesh: bluer talks to BlueZ on the system bus; the bus itself is
+  # included so discovery and adapter calls work through dbus-broker
+  - --system-talk-name=org.bluez
+  - --system-talk-name=org.freedesktop.DBus
+  # portal access for desktop settings (cursor theme, dark mode)
+  - --talk-name=org.freedesktop.portal.Desktop
+
+modules:
+  - name: backchat
+    buildsystem: simple
+    builddir: true
+    build-options:
+      env:
+        CARGO_HOME: /run/build/backchat/cargo
+        # the workspace pins gpui's Linux stack: fontconfig, freetype,
+        # xkbcommon (pkg-config in the SDK) and clang for bindgen
+    build-commands:
+      - source /usr/lib/sdk/rust-stable/enable.sh && cargo build --release --offline
+      - install -Dm755 target/release/backchat "${FLATPAK_DEST}/bin/backchat"
+      - install -Dm644 self/packaging/io.github.Letdown2491.backchat.desktop
+        "${FLATPAK_DEST}/share/applications/io.github.Letdown2491.backchat.desktop"
+      - install -Dm644 self/packaging/io.github.Letdown2491.backchat.svg
+        "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.Letdown2491.backchat.svg"
+      - install -Dm644 self/packaging/io.github.Letdown2491.backchat.metainfo.xml
+        "${FLATPAK_DEST}/share/metainfo/io.github.Letdown2491.backchat.metainfo.xml"
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - self/tree
+          - .cache
+          - .data

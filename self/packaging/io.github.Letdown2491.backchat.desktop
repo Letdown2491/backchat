@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=backchat
+GenericName=Bluetooth Mesh Chat
+Comment=Chat over a Bluetooth LE mesh with nearby peers and geohash channels
+Exec=backchat
+Icon=io.github.Letdown2491.backchat
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=mesh;bluetooth;chat;bitchat;

@@ -7,6 +7,9 @@ self/tree/export
 .DerivedData
 .direnv
 
+# vendored crate sources (about 1 GB): regenerate with scripts/vendor.sh
+vendor/
+
 # publisher key never lives in the repo
 *.key
 publisher.key

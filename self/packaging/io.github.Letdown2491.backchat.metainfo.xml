@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Letdown2491.backchat</id>
+  <name>backchat</name>
+  <summary>Bluetooth mesh chat with IRC vibes</summary>
+  <developer_name>Letdown2491</developer_name>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Unlicense-1.0</project_license>
+
+  <description>
+    <p>
+      backchat is a Linux client for the bitchat protocol: serverless chat
+      over a Bluetooth LE mesh. Messages hop peer to peer with a short time
+      to live, so the room works with no internet at all; geohash channels
+      and private messages ride Nostr relays when there is one.
+    </p>
+    <p>
+      Wire compatible with the upstream bitchat iOS and Android clients:
+      join the same room as nearby phones without an account, a server,
+      or a phone number.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.Letdown2491.backchat.desktop</launchable>
+
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">moderate</content_attribute>
+  </content_rating>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-16">
+      <description>
+        <p>First packaging: BLE mesh dual-role radio, geohash channels,
+        private messages, and the people-rail client.</p>
+      </description>
+    </release>
+  </releases>
+</component>

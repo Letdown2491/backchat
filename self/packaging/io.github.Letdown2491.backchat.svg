@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="56" fill="#0b0e12"/>
+  <!-- chat bubble -->
+  <path d="M72 68 h112 a16 16 0 0 1 16 16 v56 a16 16 0 0 1 -16 16 h-72 l-28 26 v-26 h-12 a16 16 0 0 1 -16 -16 v-56 a16 16 0 0 1 16 -16 z" fill="#63d69c"/>
+  <!-- mesh hop dots inside the bubble -->
+  <circle cx="100" cy="112" r="9" fill="#0b0e12"/>
+  <circle cx="128" cy="112" r="9" fill="#0b0e12"/>
+  <circle cx="156" cy="112" r="9" fill="#0b0e12"/>
+  <!-- mesh arcs, signal style -->
+  <path d="M100 196 a56 56 0 0 1 56 0" stroke="#63d69c" stroke-width="10" fill="none" stroke-linecap="round"/>
+  <path d="M86 178 a84 84 0 0 1 84 0" stroke="#63d69c" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.55"/>
+</svg>

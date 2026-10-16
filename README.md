@@ -18,8 +18,10 @@ and which Swift files define wire behavior.
   peripheral roles.
 - `crates/backchat`: the GPUI client: people rail, transport-hued spaces (nearby / channel / private), composer.
 - `fixtures/`: conformance vectors ported from upstream's test suite.
-- `self/`, `scripts/build.sh` (planned): flatpak tree + Orchard publish,
-  modeled on orchard's own self-publishing setup.
+- `self/`: flatpak packaging + Orchard publishing
+  ([self/packaging/README.md](self/packaging/README.md)); `scripts/build.sh`
+  drives the pinned Fedora 43 container, and `scripts/vendor.sh` regenerates
+  the vendored crate sources all builds consume.
 
 ## Status
 
