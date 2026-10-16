@@ -488,7 +488,7 @@ impl Render for ChatView {
                             // gets clickable sender names and system pills.
                             let entries: Vec<(i64, String, String, bool, bool, bool)> =
                                 match pane {
-                                    Pane::Dm(peer, _) => dm_lines
+                                    Pane::Dm(..) => dm_lines
                                         .iter()
                                         .map(|dm| {
                                             (
