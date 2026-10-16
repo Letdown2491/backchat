@@ -19,6 +19,8 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --pr
 RUN dnf -y install gcc pkgconf-pkg-config fontconfig-devel freetype-devel \
       libxkbcommon-devel libxkbcommon-x11-devel clang-devel \
       flatpak python3 \
+      # libdbus headers for bluer (BlueZ over D-Bus).
+      dbus-devel \
       # Vulkan loader + lavapipe (software rendering) so gpui can run in
       # the container without GPU device passthrough.
       mesa-vulkan-drivers vulkan-loader \

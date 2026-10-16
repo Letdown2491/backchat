@@ -83,6 +83,28 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 | `NostrPoW.swift`, `Base64URLCoding.swift`, `Bech32.swift` | encoding utilities | `nostr::` | respective tests |
 | `NostrRelayManager.swift`, `GeoRelayDirectory.swift` | relay selection, subscriptions, 24 h lookback | `nostr::relay` | `GeoRelayDirectoryTests` |
 
+### bitchat/Noise — session layer (M2)
+
+| Upstream file | Defines | bitchat-rs module | Fixtures |
+|---|---|---|---|
+| `Noise/NoiseProtocol.swift` | Hand-rolled XX: raw 32-B protocol name as `ck`/`h` seed, `mixPreMessageKeys()` → h=SHA256(name), sequential per-key handshake AEAD nonces, transport cipher split (send/recv) | `core::noise_session` | snow cross-checks (`tests/noise_session.rs`, `tests/snow_debug.rs`), `tests/noise_vectors.rs` |
+| `Noise/NoiseCipherState.swift` | Extracted-nonce transport frame `BE32(nonce) ‖ ct ‖ tag`, ChaCha nonce `00000000‖LE64(counter)`, 1024-bit sliding replay window, MAX_SEND_NONCE = u32::MAX−1 | `core::noise_session::{TransportCipher, ReplayWindow}` | same |
+| `Services/NoiseSessionManager.swift` | Lazy initiation (handshake on first private send), session clearing on decrypt failure → re-handshake | `ble::engine` (v1 skips upstream rekey) | `ble::tests/engine.rs` |
+
+### BLE mesh engine + link (M2)
+
+| Upstream file | Defines | bitchat-rs module |
+|---|---|---|
+| `Sync/PacketIdUtil.swift`, `Services/BLEPacketDeduplicator`-equivalent | dedup id = SHA-256(type‖sender‖ts BE‖payload), LRU 1000 / 5 min | `ble::dedup` |
+| `BLEFragmentAssemblyBuffer.swift`, `BLEFragmentHandler.swift` | fragment payload `[8B id][2B index][2B total][1B orig type][chunk]`, chunks of the FULL original packet binary, (sender,id) keyed assembly | `ble::fragment` |
+| `BLEService.swift` (announce builder ~2745–2830, public send ~855–900) | announce TLV + Ed25519 `signPacket` over `toBinaryDataForSigning()`; public message = plain UTF-8 payload | `ble::engine` |
+| `bitchat/Protocols/BitchatProtocol.swift:76` | NoisePayloadType byte INSIDE the noise plaintext (`[type][PrivateMessagePacket TLV]`) | `ble::engine::seal_private` |
+| `BLEService.swift` (dual role) | peripheral advertise + GATT write-without-response/notify AND central scan/connect on one adapter | `ble::link` (bluer) |
+
+Deliberate v1 deviations (documented in `ble::link`): all outbound frames
+flood every link (no per-peer link tables); fanout subsetting, TTL clamps,
+and gossip sync are not ported yet.
+
 ### Mesh semantics (behavioral, no fixed bytes — but interop-relevant)
 
 | Upstream file | Defines |
@@ -101,9 +123,11 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 | GATT service UUID (testnet) | `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A` | `BLEService.swift` |
 | MTU / fragmentation | 512 B MTU, ~469 B fragments | `BitchatProtocol.swift`, whitepaper §4.4 |
 
-Also port the GATT characteristic layout and advertisement payload layout
-from `BLEService*.swift` / `BLELinkBindings.swift` before M2 — a mesh client
-with the wrong characteristic UUIDs pairs with nothing.
+Characteristic `A1B2C3D4-E5F6-4A5B-8C9D-0E1F2A3B4C5D` carries all framed
+packets in both directions (phone writes → us; we notify → phone).
+`ble::link` implements exactly this pairing surface; iOS DEBUG builds
+advertise the TESTNET service UUID — pick the network with
+`MeshConfig::network` if a phone pairs with nothing.
 
 ## Ignored by design (never port)
 

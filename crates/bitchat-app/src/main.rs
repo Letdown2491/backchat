@@ -41,10 +41,35 @@ fn main() {
     };
     let (relay_tx, relay_rx) = runtime
         .block_on(async { bitchat_nostr::relay::spawn_relay_manager(relays) });
+
+    // BLE mesh node: needs BlueZ on the system bus; degrades to None when
+    // bluetooth is unavailable (container, no adapter, …).
+    let mesh_nickname = if settings.nickname.is_empty() {
+        "anon".to_string()
+    } else {
+        settings.nickname.clone()
+    };
+    let mesh = match runtime.block_on(bitchat_ble::node::spawn(bitchat_ble::MeshConfig {
+        nickname: mesh_nickname,
+        ..Default::default()
+    })) {
+        Ok(handle) => {
+            eprintln!("bitchat-rs: BLE mesh node running");
+            Some(handle)
+        }
+        Err(e) => {
+            eprintln!("bitchat-rs: BLE mesh disabled: {e}");
+            None
+        }
+    };
+
     std::thread::Builder::new()
         .name("tokio-runtime".into())
         .spawn(move || runtime.block_on(std::future::pending::<()>()))
         .expect("spawn tokio thread");
+
+    let mesh_cmd_tx = mesh.as_ref().map(|m| m.cmd_tx.clone());
+    let mesh_events = mesh.map(|m| m.events);
 
     Application::new().run(move |cx: &mut App| {
         cx.bind_keys(input::key_bindings());
@@ -63,6 +88,7 @@ fn main() {
                             settings.clone(),
                             directory.clone(),
                             relay_tx.clone(),
+                            mesh_cmd_tx.clone(),
                         );
                         if !store.settings.nickname.is_empty() {
                             store.system_line(format!(
@@ -79,7 +105,7 @@ fn main() {
                     if !geohash.is_empty() {
                         store.update(cx, |store, _| store.join(&geohash));
                     }
-                    chat::ChatView::new(store, relay_rx, cx)
+                    chat::ChatView::new(store, relay_rx, mesh_events, cx)
                 })
             },
         )

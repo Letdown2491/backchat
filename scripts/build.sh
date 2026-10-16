@@ -22,8 +22,12 @@ if ! podman image exists "$IMAGE"; then
   podman build -t "$IMAGE" -f containers/bitchat-dev-rust.containerfile containers/
 fi
 
+# Named volume so crates downloaded once survive `--rm` runs; the podman
+# network is flaky (HTTP2 framing errors) and full re-fetches fail often.
 exec podman run --rm \
-  -v "$PWD":/work:Z -w /work \
+  -v "$PWD":/work:Z \
+  -v bitchat-cargo-registry:/usr/local/cargo/registry:Z \
+  -w /work \
   -e PATH=/usr/local/cargo/bin:/usr/bin:/bin \
   "$IMAGE" \
   cargo "$@"

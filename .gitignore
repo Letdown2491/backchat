@@ -10,3 +10,4 @@ self/tree/export
 # publisher key never lives in the repo
 *.key
 publisher.key
+.data/

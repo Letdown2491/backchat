@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 
 # The runtime needs: the Wayland socket, fonts (the container has none),
 # and SELinux labeling off so the socket is connectable.
+# BLE mesh: BlueZ talks over the system D-Bus socket; the mesh identity
+# (Noise + signing keys) persists in .data so restarts keep the same peer ID.
 exec podman run --rm -i \
   -v "$PWD":/work -w /work \
   -e PATH=/usr/local/cargo/bin:/usr/bin:/bin \
@@ -19,5 +21,8 @@ exec podman run --rm -i \
   -e XDG_RUNTIME_DIR="/run/user/$(id -u)" \
   -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}" \
   -v /usr/share/fonts:/usr/share/fonts:ro \
+  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
+  -e XDG_DATA_HOME=/work/.data \
+  -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
   localhost/bitchat-dev-rust \
   ./target/debug/bitchat

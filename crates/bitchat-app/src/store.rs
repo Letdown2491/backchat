@@ -4,6 +4,8 @@
 //! command/event channels.
 
 use crate::persistence::Settings;
+use bitchat_ble::engine::MeshEvent;
+use bitchat_ble::node::Command as MeshCommand;
 use bitchat_nostr::event::{kinds, NostrEvent};
 use bitchat_nostr::geohash;
 use bitchat_nostr::identity::Identity;
@@ -38,6 +40,10 @@ pub struct ChatStore {
     /// pubkey hex → presence state for the current channel.
     peers: HashMap<String, Peer>,
     relay_tx: UnboundedSender<RelayCommand>,
+    /// BLE mesh node command channel (None when bluetooth is unavailable).
+    pub mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
+    /// mesh peer id → (nickname, last_seen secs).
+    mesh_peers: HashMap<[u8; 8], (String, i64)>,
 }
 
 impl ChatStore {
@@ -46,6 +52,7 @@ impl ChatStore {
         settings: Settings,
         directory: Vec<bitchat_nostr::relay_geo::Entry>,
         relay_tx: UnboundedSender<RelayCommand>,
+        mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
     ) -> Self {
         Self {
             device_seed,
@@ -57,6 +64,8 @@ impl ChatStore {
             connected_relays: 0,
             peers: HashMap::new(),
             relay_tx,
+            mesh_tx,
+            mesh_peers: HashMap::new(),
         }
     }
 
@@ -113,6 +122,7 @@ impl ChatStore {
         self.settings.nickname = nickname;
         self.system_line(format!("nickname set to {}", self.settings.nickname));
         self.send_presence(); // announce the new name
+        self.sync_mesh_nickname();
         self.persist();
     }
 
@@ -145,6 +155,8 @@ impl ChatStore {
         });
         self.trim();
         let _ = self.relay_tx.send(RelayCommand::Publish(event));
+        // Mesh is bridged: the same text also floods over BLE.
+        self.send_mesh_public(content);
     }
 
     fn send_presence(&self) {
@@ -196,6 +208,96 @@ impl ChatStore {
         }
     }
 
+    /// Handle one inbound BLE mesh event.
+    pub fn on_mesh_event(&mut self, event: MeshEvent) {
+        match event {
+            MeshEvent::PeerSeen { peer_id, nickname, is_new } => {
+                if is_new {
+                    self.system_line(format!("{nickname} discovered over BLE mesh"));
+                }
+                self.mesh_peers.insert(peer_id, (nickname, now_secs()));
+            }
+            MeshEvent::PeerExpired { peer_id } => {
+                if let Some((nick, _)) = self.mesh_peers.remove(&peer_id) {
+                    self.system_line(format!("{nick} left the mesh"));
+                }
+            }
+            MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
+                self.lines.push(ChatLine::Message {
+                    sender: nickname,
+                    content,
+                    ours: false,
+                    timestamp: (timestamp / 1000) as i64,
+                });
+                self.trim();
+            }
+            MeshEvent::PrivateMessage { nickname, content, .. } => {
+                self.lines.push(ChatLine::Message {
+                    sender: format!("{nickname} (dm)"),
+                    content,
+                    ours: false,
+                    timestamp: now_secs(),
+                });
+                self.trim();
+            }
+        }
+    }
+
+    /// Broadcast on the BLE mesh (if it's up).
+    pub fn send_mesh_public(&mut self, content: &str) {
+        let Some(mesh_tx) = &self.mesh_tx else { return };
+        let _ = mesh_tx.try_send(MeshCommand::SendPublic(content.to_string()));
+    }
+
+    /// Direct message a mesh peer by nickname.
+    pub fn send_mesh_dm(&mut self, nick: &str, content: &str) {
+        let Some(mesh_tx) = &self.mesh_tx else {
+            self.system_line("mesh is not running (bluetooth unavailable?)");
+            return;
+        };
+        let Some((peer_id, _)) = self
+            .mesh_peers
+            .iter()
+            .find(|(_, (n, _))| n.eq_ignore_ascii_case(nick))
+            .map(|(k, v)| (*k, v))
+        else {
+            self.system_line(format!("no mesh peer named {nick} — /peers"));
+            return;
+        };
+        let _ = mesh_tx.try_send(MeshCommand::SendPrivate { peer: peer_id, content: content.to_string() });
+        self.lines.push(ChatLine::Message {
+            sender: format!("{} (dm→)", self.nickname_or_id()),
+            content: content.to_string(),
+            ours: true,
+            timestamp: now_secs(),
+        });
+        self.trim();
+    }
+
+    pub fn mesh_peer_count(&self, now: i64) -> usize {
+        self.mesh_peers.values().filter(|(_, seen)| now - seen < 600).count()
+    }
+
+    pub fn mesh_peer_names(&self, now: i64) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .mesh_peers
+            .iter()
+            .filter(|(_, (_, seen))| now - *seen < 600)
+            .map(|(_, (n, _))| n.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Nickname change propagates to the mesh (re-announce).
+    pub fn sync_mesh_nickname(&self) {
+        if let Some(mesh_tx) = &self.mesh_tx {
+            if !self.settings.nickname.is_empty() {
+                let _ = mesh_tx.try_send(MeshCommand::SetNickname(self.settings.nickname.clone()));
+            }
+        }
+    }
+
     pub fn on_status(&mut self, delta: i32) {
         self.connected_relays =
             (self.connected_relays as i32 + delta).clamp(0, i32::MAX as i32) as usize;
@@ -237,6 +339,13 @@ impl ChatStore {
     }
 }
 
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn tag_value(tags: &[Vec<String>], key: &str) -> Option<String> {
     tags.iter()
         .find(|t| t.first().map(|k| k.as_str()) == Some(key))
@@ -249,7 +358,7 @@ mod tests {
 
     fn store_with_channel() -> ChatStore {
         let (_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RelayCommand>();
-        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), _tx);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), _tx, None);
         store.join("dr5rs");
         store
     }

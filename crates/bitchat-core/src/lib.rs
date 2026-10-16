@@ -18,10 +18,12 @@
 
 pub mod capabilities;
 pub mod compression;
+pub mod identity;
 pub mod limits;
 pub mod message_type;
 pub mod noise;
 pub mod noise_payload;
+pub mod noise_session;
 pub mod packet;
 pub mod padding;
 pub mod peer_id;

@@ -3,6 +3,7 @@
 
 use crate::input::{Submit, TextInput};
 use crate::store::{ChatLine, ChatStore};
+use bitchat_ble::engine::MeshEvent;
 use bitchat_nostr::relay::RelayEvent;
 use gpui::{
     div, prelude::*, px, rgb, App, Context, Entity, Focusable, FontWeight, ParentElement, Render,
@@ -29,6 +30,7 @@ impl ChatView {
     pub fn new(
         store: Entity<ChatStore>,
         mut relay_rx: tokio::sync::mpsc::UnboundedReceiver<RelayEvent>,
+        mesh_rx: Option<tokio::sync::mpsc::Receiver<MeshEvent>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let pump_store = store.downgrade();
@@ -45,6 +47,21 @@ impl ChatView {
             }
         })
         .detach();
+
+        // BLE mesh pump: forwards mesh events into the store.
+        if let Some(mut mesh_rx) = mesh_rx {
+            let mesh_store = store.downgrade();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    let Some(event) = mesh_rx.recv().await else {
+                        return; // node gone
+                    };
+                    let _ = mesh_store.update(cx, |store, _| store.on_mesh_event(event));
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .detach();
+        }
 
         // Presence heartbeat: announce us every 60 s while a channel is open.
         // Uses a gpui timer (this future runs on gpui's executor, not tokio).
@@ -85,11 +102,30 @@ impl ChatView {
                 match (parts.next(), parts.next()) {
                     (Some("join"), Some(arg)) => store.join(arg),
                     (Some("nick"), Some(arg)) => store.set_nickname(arg),
+                    (Some("msg"), Some(rest)) => {
+                        let mut parts = rest.splitn(2, ' ');
+                        match (parts.next(), parts.next()) {
+                            (Some(nick), Some(dm)) => store.send_mesh_dm(nick, dm),
+                            _ => store.system_line("usage: /msg <nick> <text>"),
+                        }
+                    }
+                    (Some("peers"), _) => {
+                        let now = crate::store::now_secs();
+                        let names = store.mesh_peer_names(now);
+                        if names.is_empty() {
+                            store.system_line("no mesh peers nearby (is bluetooth up? phone advertising?)");
+                        } else {
+                            store.system_line(format!("mesh peers: {}", names.join(", ")));
+                        }
+                    }
                     (Some("help"), _) => {
-                        store.system_line("commands: /join <geohash> · /nick <name> · /help");
+                        store.system_line(
+                            "commands: /join <geohash> · /nick <name> · /msg <nick> <text> · /peers · /help",
+                        );
                     }
                     (Some("join"), None) => store.system_line("usage: /join <geohash>"),
                     (Some("nick"), None) => store.system_line("usage: /nick <name>"),
+                    (Some("msg"), None) => store.system_line("usage: /msg <nick> <text>"),
                     (Some(other), _) => {
                         store.system_line(format!("unknown command /{other} — /help"))
                     }
@@ -112,8 +148,13 @@ impl Focusable for ChatView {
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = now_secs();
-        let (channel, peers, status) = self.store.update(cx, |store, _| {
-            (store.geohash.clone(), store.peers_here(now), store.connected_relays)
+        let (channel, peers, status, mesh_peers) = self.store.update(cx, |store, _| {
+            (
+                store.geohash.clone(),
+                store.peers_here(now),
+                store.connected_relays,
+                store.mesh_peer_count(now),
+            )
         });
         let lines: Vec<ChatLine> = self.store.update(cx, |store, _| store.lines.clone());
         let line_count = lines.len();
@@ -155,6 +196,16 @@ impl Render for ChatView {
                                     .text_size(px(12.))
                                     .text_color(rgb(FG_DIM))
                                     .child(format!("{peers} here")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(if mesh_peers > 0 { rgb(ACCENT) } else { rgb(FG_DIM) })
+                                    .child(if mesh_peers > 0 {
+                                        format!("◍ {mesh_peers} mesh")
+                                    } else {
+                                        "◍ mesh".to_string()
+                                    }),
                             ),
                     )
                     .child(
