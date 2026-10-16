@@ -115,8 +115,6 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
     let link_config = config.clone();
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(64);
     let (events_tx, events_rx) = mpsc::channel::<MeshEvent>(256);
-    let (inbound_tx, mut inbound_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
     let task = tokio::spawn(async move {
         let mut engine = Engine::new(identity, config.nickname.clone());
@@ -125,42 +123,85 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
         announce.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut tick = tokio::time::interval(Duration::from_secs(30));
 
-        if dispatch(engine.announce_action(now_ms()), &outbound_tx, &events_tx).await {
+        let mut last_inbound_ms = now_ms();
+        let mut link = match link::spawn(&link_config, false).await {
+            Ok(link) => link,
+            Err(e) => {
+                eprintln!("node: link failed to start: {e}");
+                return;
+            }
+        };
+
+        if dispatch(engine.announce_action(now_ms()), &link.outbound_tx, &events_tx).await {
             return;
         }
 
         loop {
+            // Heal check: the link has been reporting hard connect failures
+            // and nothing has arrived inbound for a long while — the adapter
+            // is wedged. Rebuild the radio around a power cycle; the engine
+            // (identity, sessions, registry) survives untouched.
+            {
+                let now = now_ms();
+                let wedged = link.wedge_failures.load(std::sync::atomic::Ordering::Relaxed);
+                let silent_for = now.saturating_sub(last_inbound_ms);
+                if wedged >= 2 && silent_for > 120_000 {
+                    eprintln!(
+                        "node: adapter wedged ({wedged} hard failures, no inbound for {:.0}s) — restarting the link",
+                        silent_for / 1000
+                    );
+                    link.task.abort();
+                    link.discovery.abort();
+                    link = match link::spawn(&link_config, true).await {
+                        Ok(link) => {
+                            last_inbound_ms = now_ms();
+                            link
+                        }
+                        Err(e) => {
+                            eprintln!("node: link restart failed: {e}");
+                            return;
+                        }
+                    };
+                }
+            }
+
             tokio::select! {
-                raw = inbound_rx.recv() => {
-                    let Some(raw) = raw else { break };
+                raw = link.inbound_rx.recv() => {
+                    let Some(raw) = raw else {
+                        // Link task ended (adapter reset, fatal bluer error):
+                        // rebuild the radio instead of taking the node down.
+                        eprintln!("node: link ended — restarting");
+                        link = match link::spawn(&link_config, false).await {
+                            Ok(link) => {
+                                last_inbound_ms = now_ms();
+                                link
+                            }
+                            Err(e) => {
+                                eprintln!("node: link restart failed: {e}");
+                                return;
+                            }
+                        };
+                        continue;
+                    };
+                    last_inbound_ms = now_ms();
                     let mut actions = engine.on_bytes(&raw, now_ms());
                     actions.extend(engine.tick(now_ms()));
-                    let mut stop = false;
                     for action in actions {
-                        if dispatch(action, &outbound_tx, &events_tx).await {
-                            stop = true;
-                            break;
+                        if dispatch(action, &link.outbound_tx, &events_tx).await {
+                            return;
                         }
-                    }
-                    if stop {
-                        break;
                     }
                 }
                 _ = announce.tick() => {
-                    if dispatch(engine.announce_action(now_ms()), &outbound_tx, &events_tx).await {
-                        break;
+                    if dispatch(engine.announce_action(now_ms()), &link.outbound_tx, &events_tx).await {
+                        return;
                     }
                 }
                 _ = tick.tick() => {
-                    let mut stop = false;
                     for action in engine.tick(now_ms()) {
-                        if dispatch(action, &outbound_tx, &events_tx).await {
-                            stop = true;
-                            break;
+                        if dispatch(action, &link.outbound_tx, &events_tx).await {
+                            return;
                         }
-                    }
-                    if stop {
-                        break;
                     }
                 }
                 command = cmd_rx.recv() => {
@@ -169,43 +210,33 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                         Command::SetNickname(nickname) => {
                             engine.set_nickname(nickname.clone());
                             // Re-announce under the new name.
-                            if dispatch(engine.announce_action(now_ms()), &outbound_tx, &events_tx).await {
-                                break;
+                            if dispatch(engine.announce_action(now_ms()), &link.outbound_tx, &events_tx).await {
+                                return;
                             }
                         }
                         Command::SendPublic(content) => {
-                            let mut stop = false;
                             for action in engine.send_public(&content, now_ms()) {
-                                if dispatch(action, &outbound_tx, &events_tx).await {
-                                    stop = true;
-                                    break;
+                                if dispatch(action, &link.outbound_tx, &events_tx).await {
+                                    return;
                                 }
-                            }
-                            if stop {
-                                break;
                             }
                         }
                         Command::SendPrivate { peer, content } => {
-                            let mut stop = false;
                             for action in engine.send_private(peer, &content, now_ms()) {
-                                if dispatch(action, &outbound_tx, &events_tx).await {
-                                    stop = true;
-                                    break;
+                                if dispatch(action, &link.outbound_tx, &events_tx).await {
+                                    return;
                                 }
-                            }
-                            if stop {
-                                break;
                             }
                         }
                         Command::AnnounceNow => {
-                            if dispatch(engine.announce_action(now_ms()), &outbound_tx, &events_tx).await {
-                                break;
+                            if dispatch(engine.announce_action(now_ms()), &link.outbound_tx, &events_tx).await {
+                                return;
                             }
                         }
                         Command::Shutdown => {
                             let leave = engine.leave_action(now_ms());
                             if let Action::Broadcast(bytes) = leave {
-                                let _ = outbound_tx.send(bytes).await;
+                                let _ = link.outbound_tx.send(bytes).await;
                             }
                             tokio::time::sleep(Duration::from_millis(150)).await;
                             break;
@@ -214,9 +245,9 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                 }
             }
         }
+        link.task.abort();
+        link.discovery.abort();
     });
-
-    let _link_task = link::spawn(&link_config, inbound_tx, outbound_rx).await?;
 
     Ok(NodeHandle { events: events_rx, cmd_tx, task })
 }

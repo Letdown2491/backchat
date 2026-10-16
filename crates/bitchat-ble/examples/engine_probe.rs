@@ -18,13 +18,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity.peer_id()
     );
 
-    let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel(256);
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(256);
     let config = bitchat_ble::MeshConfig {
         nickname: "engine-probe".into(),
         ..Default::default()
     };
-    let _link = link::spawn(&config, inbound_tx, outbound_rx).await?;
+    let mut link = link::spawn(&config, false).await?;
+    let inbound_rx = &mut link.inbound_rx;
+    let outbound_tx = &link.outbound_tx;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

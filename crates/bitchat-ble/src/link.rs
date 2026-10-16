@@ -37,6 +37,28 @@ pub type OutboundTx = mpsc::Sender<Vec<u8>>;
 /// Raw packet bytes received from any radio path.
 pub type InboundTx = mpsc::Sender<Vec<u8>>;
 
+/// A running link layer. Holds the live bluer handles (dropping the
+/// advertisement / GATT application handles *stops advertising* and
+/// unregisters the server — they must stay alive for the link's lifetime).
+/// Tear down by aborting [`LinkHandle::task`] and [`LinkHandle::discovery`].
+pub struct LinkHandle {
+    /// Raw packets received from any radio path.
+    pub inbound_rx: mpsc::Receiver<Vec<u8>>,
+    /// Raw packets to transmit.
+    pub outbound_tx: OutboundTx,
+    /// Consecutive hard connect failures (D-Bus timeouts / NotReady) that
+    /// suggest the adapter is wedged; cleared on any successful connect.
+    pub wedge_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The outbound pump task.
+    pub task: tokio::task::JoinHandle<()>,
+    /// The discovery task.
+    pub discovery: tokio::task::JoinHandle<()>,
+    /// Live advertisement — dropping it stops advertising.
+    _adv: bluer::adv::AdvertisementHandle,
+    /// Live GATT application — dropping it unregisters the server.
+    _gatt: bluer::gatt::local::ApplicationHandle,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LinkError {
     #[error("bluer: {0}")]
@@ -45,15 +67,18 @@ pub enum LinkError {
     NoAdapter,
 }
 
-/// Runs the link layer until the returned task is aborted. Returns the
-/// outbound sender the node pushes packets into.
-pub async fn spawn(
-    config: &MeshConfig,
-    inbound_tx: InboundTx,
-    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
-) -> Result<tokio::task::JoinHandle<()>, LinkError> {
+/// Runs the link layer until the handle's tasks are aborted. When
+/// `heal_power_cycle` is set (respawn after wedge detection), the adapter is
+/// power-cycled first: an HCI reset clears zombie LE connections left behind
+/// when a client died mid-connection — without it the controller stays deaf.
+pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHandle, LinkError> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
+    if heal_power_cycle {
+        eprintln!("{} link: heal — power-cycling adapter", ts());
+        let _ = adapter.set_powered(false).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
     adapter.set_powered(true).await?;
 
     let service_uuid = config.network.service_uuid();
@@ -71,6 +96,9 @@ pub async fn spawn(
     // BlueZ runs one connection procedure at a time — concurrent Connect
     // calls fail with "In Progress".
     let connect_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let wedge_failures = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
     // ---- Peripheral: advertisement + local GATT ----------------------------
     let advertisement = Advertisement {
@@ -80,10 +108,9 @@ pub async fn spawn(
         local_name: Some(config.nickname.clone()),
         ..Default::default()
     };
-    let _adv_handle = adapter.advertise(advertisement).await?;
+    let adv_handle = adapter.advertise(advertisement).await?;
 
-    let (char_control, char_control_handle) = characteristic_control();
-    let application = Application {
+    let (char_control, char_control_handle) = characteristic_control();    let application = Application {
         services: vec![Service {
             uuid: service_uuid,
             primary: true,
@@ -106,7 +133,7 @@ pub async fn spawn(
         }],
         ..Default::default()
     };
-    let _app_handle = adapter.serve_gatt_application(application).await?;
+    let app_handle = adapter.serve_gatt_application(application).await?;
 
     // Peripheral control loop: accept writes (inbound packets) and notify
     // subscriptions (outbound sinks).
@@ -150,6 +177,7 @@ pub async fn spawn(
     let discovery = {
         let links = links.clone();
         let inbound_tx = inbound_tx.clone();
+        let wedge_failures = wedge_failures.clone();
         let own_address = adapter.address().await.unwrap_or_default();
         tokio::spawn(async move {
             let filter = DiscoveryFilter {
@@ -187,12 +215,20 @@ pub async fn spawn(
                             );
                             let inbound = inbound_tx.clone();
                             let connect_lock = connect_lock.clone();
+                                            let wedge_failures = wedge_failures.clone();
                             let (remote_tx, remote_rx) = mpsc::channel::<Vec<u8>>(64);
                             links.lock().await.remotes.insert(addr, remote_tx.clone());
                             tokio::spawn(async move {
                                 let mut remote_rx = remote_rx;
-                                let result =
-                                    run_remote(&device, service_uuid, &mut remote_rx, &inbound, &connect_lock).await;
+                                let result = run_remote(
+                                    &device,
+                                    service_uuid,
+                                    &mut remote_rx,
+                                    &inbound,
+                                    &connect_lock,
+                                    &wedge_failures,
+                                )
+                                .await;
                                 eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
                                 links.lock().await.remotes.remove(&addr);
                             });
@@ -206,7 +242,8 @@ pub async fn spawn(
     };
 
     // ---- Outbound pump: write every frame to every live link ---------------
-    let outbound_task = tokio::spawn(async move {
+    let task = tokio::spawn(async move {
+        let mut outbound_rx = outbound_rx;
         while let Some(bytes) = outbound_rx.recv().await {
             let mut links = links.lock().await;
             eprintln!(
@@ -226,8 +263,15 @@ pub async fn spawn(
         }
     });
 
-    drop(discovery); // task keeps running via tokio::spawn; handle unused
-    Ok(outbound_task)
+    Ok(LinkHandle {
+        inbound_rx,
+        outbound_tx,
+        wedge_failures,
+        task,
+        discovery,
+        _adv: adv_handle,
+        _gatt: app_handle,
+    })
 }
 
 /// Central-role connection to one remote device: acquire write-without-
@@ -238,7 +282,9 @@ async fn run_remote(
     outbound_rx: &mut mpsc::Receiver<Vec<u8>>,
     inbound_tx: &InboundTx,
     connect_lock: &tokio::sync::Mutex<()>,
+    wedge_failures: &std::sync::atomic::AtomicU32,
 ) -> bluer::Result<()> {
+    use std::sync::atomic::Ordering;
     {
         // Serialize connection procedures across all remotes.
         let _guard = connect_lock.lock().await;
@@ -255,22 +301,23 @@ async fn run_remote(
                     }
                     Err(err) => {
                         eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
-                        // The LE controller accumulates zombie connections when
-                        // clients die mid-connection; scans then return nothing
-                        // and every connect D-Bus-times out. Point the user at
-                        // the host-side reset instead of failing silently.
+                        // D-Bus timeouts / NotReady while the radio is otherwise
+                        // silent indicate the adapter is wedged (zombie LE
+                        // connections from a killed client). The node watches
+                        // this counter together with inbound silence.
                         let msg = err.to_string();
-                        if msg.contains("Timeout") || msg.contains("NotReady") {
-                            eprintln!(
-                                "{} !! adapter looks wedged (D-Bus timeouts / NotReady) —\n     run scripts/ble-reset.sh on the HOST, then restart the app",
-                                ts()
-                            );
+                        if msg.contains("Timeout")
+                            || msg.contains("NotReady")
+                            || msg.contains("InProgress")
+                        {
+                            wedge_failures.fetch_add(1, Ordering::Relaxed);
                         }
                         return Err(err);
                     }
                 }
             }
         }
+        wedge_failures.store(0, Ordering::Relaxed);
     }
     eprintln!("{} remote {}: connected", ts(), device.address());
 

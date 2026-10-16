@@ -5,16 +5,15 @@ use bitchat_ble::MeshConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel(256);
-    let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(64);
-
     let config = MeshConfig {
         nickname: std::env::args()
             .nth(1)
             .unwrap_or_else(|| "probe".into()),
         ..Default::default()
     };
-    let _link_task = bitchat_ble::link::spawn(&config, inbound_tx, outbound_rx).await?;
+    let mut link = bitchat_ble::link::spawn(&config, false).await?;
+    let inbound_rx = &mut link.inbound_rx;
+    let outbound_tx = &link.outbound_tx;
     eprintln!("probe: link layer running — waiting for peers (Ctrl-C to quit)");
 
     // One announce so a phone that discovers us sees a packet too.
