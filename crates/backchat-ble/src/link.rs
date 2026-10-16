@@ -214,7 +214,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         tokio::spawn(async move {
             const ADV_INSTANCES: usize = 3;
             let mut failures = 0u32;
-            let mut flag_dead = |failures: u32, dbus_dead: &std::sync::atomic::AtomicBool| {
+            let flag_dead = |failures: u32, dbus_dead: &std::sync::atomic::AtomicBool| {
                 if failures >= 3 {
                     eprintln!("{} peripheral: bluetoothd unreachable: flagging the session for a rebuild", ts());
                     dbus_dead.store(true, std::sync::atomic::Ordering::Relaxed);
