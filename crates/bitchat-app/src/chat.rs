@@ -6,8 +6,8 @@ use crate::store::{ChatLine, ChatStore};
 use bitchat_ble::engine::MeshEvent;
 use bitchat_nostr::relay::RelayEvent;
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, Entity, Focusable, FontWeight, ParentElement, Render,
-    Styled, UniformListScrollHandle, Window, uniform_list,
+    div, list, prelude::*, px, rgb, App, Context, Entity, Focusable, FontWeight, ListAlignment,
+    ListState, ParentElement, Render, Styled, Window,
 };
 
 const BG: u32 = 0x101418;
@@ -21,7 +21,10 @@ const INPUT_BG: u32 = 0x1a2028;
 pub struct ChatView {
     store: Entity<ChatStore>,
     input: Entity<TextInput>,
-    scroll: UniformListScrollHandle,
+    /// Variable-height chat log (uniform_list assumes equal item heights and
+    /// clips message bodies of older entries — this bug is why only the
+    /// newest message rendered fully).
+    lines_list: ListState,
 }
 
 impl ChatView {
@@ -84,7 +87,7 @@ impl ChatView {
         Self {
             store,
             input,
-            scroll: UniformListScrollHandle::new(),
+            lines_list: ListState::new(0, ListAlignment::Bottom, px(64.)),
         }
     }
 
@@ -158,6 +161,14 @@ impl Render for ChatView {
         });
         let lines: Vec<ChatLine> = self.store.update(cx, |store, _| store.lines.clone());
         let line_count = lines.len();
+        // Append only new items so the Bottom-aligned chat log keeps its
+        // scroll position and follows the tail.
+        let rendered = self.lines_list.item_count();
+        if rendered > line_count {
+            self.lines_list.reset(line_count);
+        } else if line_count > rendered {
+            self.lines_list.splice(rendered..rendered, line_count - rendered);
+        }
 
         div()
             .flex()
@@ -226,13 +237,8 @@ impl Render for ChatView {
                     .min_h_0()
                     .overflow_hidden()
                     .child(
-                        uniform_list(
-                            "lines",
-                            line_count,
-                            move |range, _window, _cx| {
-                                lines[range]
-                                    .iter()
-                                    .map(|line| match line {
+                        list(self.lines_list.clone(), move |ix, _window, _cx| {
+                            match &lines[ix] {
                                         ChatLine::System { text } => div()
                                             .px_3()
                                             .text_size(px(12.))
@@ -273,12 +279,10 @@ impl Render for ChatView {
                                                 )
                                                 .into_any_element()
                                         }
-                                    })
-                                    .collect()
+                                }
                             },
                         )
-                        .h_full()
-                        .track_scroll(self.scroll.clone()),
+                        .flex_1(),
                     ),
             )
             // Input row

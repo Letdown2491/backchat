@@ -75,7 +75,7 @@ impl Default for MeshConfig {
         Self {
             nickname: "anon".to_string(),
             network: MeshNetwork::Mainnet,
-            announce_interval_ms: 60_000,
+            announce_interval_ms: 15_000,
             peer_expiry_ms: 360_000,
         }
     }

@@ -31,75 +31,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    // Kick off with an announce.
+    // Kick off with an announce, then keep announcing every 5 s so the phone
+    // has every chance to accept us; forward ALL engine actions to the link.
     if let Action::Broadcast(bytes) = engine.announce_action(now) {
+        eprintln!("probe: my announce hex: {}", hex::encode(&bytes));
         let _ = outbound_tx.send(bytes).await;
     }
 
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut tick_counter = 0u64;
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
-        let Some(raw) = inbound_rx.recv().await else { return Ok(()) };
-        let packet = match Packet::decode(&raw) {
-            Ok(p) => p,
-            Err(e) => {
+        tokio::select! {
+            raw = inbound_rx.recv() => {
+                let Some(raw) = raw else { return Ok(()) };
+                let packet = match Packet::decode(&raw) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "probe: undecodable frame ({} bytes): {e} — hex: {}",
+                            raw.len(),
+                            hex::encode(&raw)
+                        );
+                        continue;
+                    }
+                };
                 eprintln!(
-                    "probe: undecodable frame ({} bytes): {e} — hex: {}",
+                    "probe: kind=0x{:02x} len={} sender={} recipient={}",
+                    packet.kind,
                     raw.len(),
-                    hex::encode(&raw)
+                    PeerId::from_mesh_bytes(&packet.sender_id).full(),
+                    packet
+                        .recipient_id
+                        .as_ref()
+                        .map(|r| PeerId::from_mesh_bytes(r).full())
+                        .unwrap_or_else(|| "-".into()),
                 );
-                continue;
-            }
-        };
-        eprintln!(
-            "probe: kind=0x{:02x} len={} sender={} recipient={} hex={}",
-            packet.kind,
-            raw.len(),
-            PeerId::from_mesh_bytes(&packet.sender_id).full(),
-            packet
-                .recipient_id
-                .as_ref()
-                .map(|r| PeerId::from_mesh_bytes(r).full())
-                .unwrap_or_else(|| "-".into()),
-            hex::encode(&raw)
-        );
-        if packet.kind == 0x01 {
-            let sender = PeerId::from_mesh_bytes(&packet.sender_id);
-            match AnnouncementPacket::decode(&packet.payload) {
-                Some(announce) => {
-                    let derived = PeerId::from_noise_static_public_key(&announce.noise_public_key);
-                    eprintln!(
-                        "probe: ANNOUNCE from claimed={} nickname={:?} derived_from_noise_key={} match={} sig_present={}",
-                        sender.full(),
-                        announce.nickname,
-                        derived.full(),
-                        derived.mesh_bytes() == Some(packet.sender_id),
-                        packet.signature.is_some()
-                    );
-                    if let Some(sig) = packet.signature {
-                        let signable = packet.to_signing_bytes()?;
-                        let ok = MeshIdentity::verify(&announce.signing_public_key, &sig, &signable);
-                        eprintln!("probe:   signature over signing-bytes ({} B): {}", signable.len(), if ok { "VALID" } else { "INVALID" });
-                        if !ok {
-                            eprintln!("probe:   signing-bytes hex: {}", hex::encode(&signable));
-                            eprintln!("probe:   sig: {}", hex::encode(sig));
-                            eprintln!("probe:   announced signing key: {}", hex::encode(announce.signing_public_key));
+                if packet.kind == 0x01 {
+                    let sender = PeerId::from_mesh_bytes(&packet.sender_id);
+                    match AnnouncementPacket::decode(&packet.payload) {
+                        Some(announce) => {
+                            let derived = PeerId::from_noise_static_public_key(&announce.noise_public_key);
+                            eprintln!(
+                                "probe: ANNOUNCE from claimed={} nickname={:?} derived_from_noise_key={} match={} sig_present={}",
+                                sender.full(),
+                                announce.nickname,
+                                derived.full(),
+                                derived.mesh_bytes() == Some(packet.sender_id),
+                                packet.signature.is_some()
+                            );
+                            if let Some(sig) = packet.signature {
+                                let signable = packet.to_signing_bytes()?;
+                                let ok = MeshIdentity::verify(&announce.signing_public_key, &sig, &signable);
+                                eprintln!("probe:   signature over signing-bytes ({} B): {}", signable.len(), if ok { "VALID" } else { "INVALID" });
+                                if !ok {
+                                    eprintln!("probe:   signing-bytes hex: {}", hex::encode(&signable));
+                                    eprintln!("probe:   sig: {}", hex::encode(sig));
+                                    eprintln!("probe:   announced signing key: {}", hex::encode(announce.signing_public_key));
+                                }
+                            }
+                        }
+                        None => eprintln!("probe: ANNOUNCE from {} — TLV DECODE FAILED", sender.full()),
+                    }
+                }
+                for action in engine.on_bytes(&raw, now_ms()) {
+                    match action {
+                        Action::Event(event) => match event {
+                            MeshEvent::PeerSeen { nickname, is_new, .. } => {
+                                eprintln!("probe: EVENT PeerSeen {nickname} (new: {is_new})");
+                            }
+                            other => eprintln!("probe: EVENT {other:?}"),
+                        },
+                        Action::Broadcast(bytes) | Action::SendTo(_, bytes) => {
+                            // Forward everything the engine emits (greets,
+                            // replies); the link treats every frame as a
+                            // broadcast write.
+                            eprintln!("probe: engine → transmit ({} bytes)", bytes.len());
+                            let _ = outbound_tx.send(bytes).await;
                         }
                     }
                 }
-                None => eprintln!("probe: ANNOUNCE from {} — TLV DECODE FAILED", sender.full()),
             }
-        }
-        for action in engine.on_bytes(&raw, now) {
-            match action {
-                Action::Broadcast(_) | Action::SendTo(_, _) => {}
-                Action::Event(event) => match event {
-                    MeshEvent::PeerSeen { nickname, is_new, .. } => {
-                        eprintln!("probe: EVENT PeerSeen {nickname} (new: {is_new})");
+            _ = ticker.tick() => {
+                if let Action::Broadcast(bytes) = engine.announce_action(now_ms()) {
+                    eprintln!("probe: periodic announce ({} bytes)", bytes.len());
+                    let _ = outbound_tx.send(bytes).await;
+                }
+                tick_counter += 1;
+                if tick_counter % 2 == 0 {
+                    for action in engine.send_public("hello from bitchat-rs (probe)", now_ms()) {
+                        if let Action::Broadcast(bytes) | Action::SendTo(_, bytes) = action {
+                            eprintln!("probe: public message → transmit ({} bytes)", bytes.len());
+                            let _ = outbound_tx.send(bytes).await;
+                        }
                     }
-                    other => eprintln!("probe: EVENT {other:?}"),
-                },
+                }
             }
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn load_or_create() -> MeshIdentity {

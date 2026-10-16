@@ -219,3 +219,35 @@ fn long_public_message_fragments_and_reassembles() {
         Some(MeshEvent::PublicMessage { content: c, .. }) if c == &content
     ));
 }
+
+/// Our announce must survive the exact validator chain the deployed Android
+/// client runs (AnnouncementIdentityValidator): TLV decode, peer-id binding,
+/// Ed25519 over the padded signing preimage.
+#[test]
+fn announce_passes_android_style_validation() {
+    let mut engine = Engine::new(MeshIdentity::generate(), "anon-test".into());
+    let action = engine.announce_action(1_759_000_000_000);
+    let Action::Broadcast(bytes) = action else {
+        panic!("expected broadcast");
+    };
+    let packet = bitchat_core::packet::Packet::decode(&bytes).expect("packet decode");
+    assert_eq!(packet.kind, 0x01);
+    assert!(packet.signature.is_some());
+
+    let announce = bitchat_core::tlv::AnnouncementPacket::decode(&packet.payload)
+        .expect("TLV decode (Android IdentityAnnouncement.decode)");
+    assert_eq!(announce.nickname, "anon-test");
+
+    let derived = bitchat_core::peer_id::PeerId::from_noise_static_public_key(&announce.noise_public_key);
+    assert_eq!(derived.mesh_bytes(), Some(packet.sender_id), "sender binding");
+
+    let signable = packet.to_signing_bytes().expect("signing preimage");
+    assert!(
+        bitchat_core::identity::MeshIdentity::verify(
+            &announce.signing_public_key,
+            packet.signature.as_ref().unwrap(),
+            &signable,
+        ),
+        "Ed25519 over padded preimage"
+    );
+}
