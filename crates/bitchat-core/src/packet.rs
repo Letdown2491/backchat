@@ -76,6 +76,12 @@ impl Packet {
     /// Encoding used for signing: fixed TTL 0, no signature, no RSR flag.
     /// TTL is excluded because relays decrement it without invalidating
     /// the Ed25519 signature.
+    ///
+    /// Upstream signs `BinaryProtocol.encode(unsignedPacket)` whose `padding`
+    /// parameter defaults to TRUE — even when the packet is *sent* unpadded
+    /// (`BLEOutboundPacketPolicy.padsBLEFrame` returns false for announces and
+    /// messages). So signatures cover the whole-frame bucket-padded form;
+    /// sign unpadded and every client rejects your packets.
     pub fn to_signing_bytes(&self) -> Result<Vec<u8>, PacketEncodeError> {
         let unsigned = Packet {
             signature: None,
@@ -83,7 +89,7 @@ impl Packet {
             ttl: 0,
             ..self.clone()
         };
-        unsigned.encode(false)
+        unsigned.encode(true)
     }
 
     pub fn encode(&self, padding: bool) -> Result<Vec<u8>, PacketEncodeError> {
@@ -368,6 +374,21 @@ mod tests {
         let bytes = pkt.encode(false).unwrap();
         let decoded = Packet::decode(&bytes).unwrap();
         assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn signing_bytes_are_bucket_padded() {
+        // Upstream signs BinaryProtocol.encode(unsigned) with padding:true —
+        // the whole frame padded to the 256/512/1024/2048 bucket — even for
+        // packets sent unpadded. Signing unpadded makes every client reject
+        // our packets (announces, messages, everything signed).
+        let pkt = Packet::new(MessageType::Message, sender(), 1_759_000_000_000, b"hello".to_vec(), 7);
+        let signable = pkt.to_signing_bytes().unwrap();
+        assert!(
+            [256, 512, 1024, 2048].contains(&signable.len()),
+            "signing bytes must fill a padding bucket, got {}",
+            signable.len()
+        );
     }
 
     #[test]

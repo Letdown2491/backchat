@@ -31,7 +31,6 @@ pub use identity::Identity;
 /// and picks relays nearest the geohash; the bundled CSV fallback lives with
 /// the relay client.
 pub const FALLBACK_RELAYS: &[&str] = &[
-    "wss://relay.damus.io",
     "wss://nos.lol",
     "wss://relay.primal.net",
     "wss://nostr.mom",
