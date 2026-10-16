@@ -739,10 +739,12 @@ fn status_line(text: impl Into<String>) -> AnyElement {
         .into_any_element()
 }
 
-/// One click-to-join row of the channel browser.
-fn browse_row(gh: &str, meta: String, cx: &mut Context<ChatView>) -> AnyElement {
+/// One click-to-join row of the channel browser. `key` scopes the element
+/// id: a geohash can appear in more than one section (ladder, history,
+/// scan), and duplicate ids corrupt gpui's element state, dead clicks.
+fn browse_row(key: &str, gh: &str, meta: String, cx: &mut Context<ChatView>) -> AnyElement {
     div()
-        .id(SharedString::from(format!("join-{gh}")))
+        .id(SharedString::from(format!("join-{key}-{gh}")))
         .mx_3()
         .px_3()
         .py_2()
@@ -756,6 +758,7 @@ fn browse_row(gh: &str, meta: String, cx: &mut Context<ChatView>) -> AnyElement 
         .on_click({
             let gh = gh.to_string();
             cx.listener(move |this, _: &ClickEvent, _, cx| {
+                eprintln!("[browse] join {gh}");
                 this.store.update(cx, |store, _| store.join(&gh));
                 this.browsing = false;
                 cx.notify();
@@ -1019,7 +1022,7 @@ impl ChatView {
                 } else {
                     format!("{level} \u{b7} {label}")
                 };
-                browse_row(&gh, meta, cx)
+                browse_row("loc", &gh, meta, cx)
             }));
         } else if geo_loading {
             kids.push(status_line("estimating your location\u{2026}"));
@@ -1028,7 +1031,7 @@ impl ChatView {
         if !history.is_empty() {
             kids.push(section_label("YOUR CHANNELS"));
             kids.extend(history.into_iter().map(|(gh, last)| {
-                browse_row(&gh, format!("last visited {}", rel_time(now - last)), cx)
+                browse_row("hist", &gh, format!("last visited {}", rel_time(now - last)), cx)
             }));
         }
 
@@ -1036,6 +1039,7 @@ impl ChatView {
             kids.push(section_label("ACTIVE RIGHT NOW"));
             kids.extend(scan.into_iter().map(|r| {
                 browse_row(
+                    "scan",
                     &r.geohash,
                     format!(
                         "{} msg \u{b7} {} people \u{b7} {} ago",
