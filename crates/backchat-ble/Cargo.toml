@@ -1,0 +1,20 @@
+[package]
+name = "backchat-ble"
+description = "BLE mesh transport for Linux: BlueZ via bluer. LE advertise (peripheral) + scan (central) + GATT, mesh relay semantics."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+backchat-core = { path = "../backchat-core" }
+bluer = { workspace = true, features = ["bluetoothd", "l2cap"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+futures = "0.3"
+uuid = "1"
+ed25519-dalek.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]

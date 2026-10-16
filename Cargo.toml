@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/bitchat-core",
-    "crates/bitchat-nostr",
-    "crates/bitchat-ble",
-    "crates/bitchat-app",
+    "crates/backchat-core",
+    "crates/backchat-nostr",
+    "crates/backchat-ble",
+    "crates/backchat",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
-repository = "https://github.com/Letdown2491/bitchat-rs"
+repository = "https://github.com/Letdown2491/backchat"
 
 [workspace.dependencies]
-# Wire format / crypto (bitchat-core)
+# Wire format / crypto (backchat-core)
 snow = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -25,16 +25,16 @@ chacha20poly1305 = "0.10"
 thiserror = "2"
 num_enum = "0.7"
 
-# Nostr transport (bitchat-nostr)
+# Nostr transport (backchat-nostr)
 secp256k1 = "0.31"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
-# BLE transport (bitchat-ble)
+# BLE transport (backchat-ble)
 bluer = "0.17"
 
-# UI (bitchat-app)
+# UI (backchat-app)
 gpui = "0.2"
 unicode-segmentation = "1"
 

@@ -504,6 +504,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "backchat"
+version = "0.1.0"
+dependencies = [
+ "backchat-ble",
+ "backchat-core",
+ "backchat-nostr",
+ "gpui",
+ "hex",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "backchat-ble"
+version = "0.1.0"
+dependencies = [
+ "backchat-core",
+ "bluer",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "backchat-core"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "flate2",
+ "hex",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "thiserror 2.0.21",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "backchat-nostr"
+version = "0.1.0"
+dependencies = [
+ "backchat-core",
+ "base64",
+ "chacha20poly1305",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand 0.9.5",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
+ "ureq",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -570,74 +638,6 @@ name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e4b40c7323adcfc0a41c4b88143ed58346ff65a288fc144329c5c45e05d70c6"
-
-[[package]]
-name = "bitchat-app"
-version = "0.1.0"
-dependencies = [
- "bitchat-ble",
- "bitchat-core",
- "bitchat-nostr",
- "gpui",
- "hex",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "tokio",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "bitchat-ble"
-version = "0.1.0"
-dependencies = [
- "bitchat-core",
- "bluer",
- "ed25519-dalek",
- "futures",
- "hex",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "bitchat-core"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "ed25519-dalek",
- "flate2",
- "hex",
- "serde_json",
- "sha2 0.10.9",
- "snow",
- "thiserror 2.0.21",
- "x25519-dalek",
-]
-
-[[package]]
-name = "bitchat-nostr"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bitchat-core",
- "chacha20poly1305",
- "futures-util",
- "hex",
- "hkdf",
- "hmac",
- "rand 0.9.5",
- "secp256k1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "tokio",
- "tokio-tungstenite",
- "ureq",
-]
 
 [[package]]
 name = "bitcoin-consensus-encoding"

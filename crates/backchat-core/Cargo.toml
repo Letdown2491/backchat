@@ -1,0 +1,20 @@
+[package]
+name = "backchat-core"
+description = "Pure bitchat wire-format and mesh semantics: packet codec, TLVs, Noise sessions, flood control. No I/O, no platform deps."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+snow.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+hex.workspace = true
+chacha20poly1305.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

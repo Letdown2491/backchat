@@ -4,7 +4,7 @@ Upstream: https://github.com/permissionlesstech/bitchat (Swift/SwiftUI, iOS/macO
 Snapshot this document was written against: `5e9287f`, 2026-09-24
 Whitepaper: `WHITEPAPER.md` v2.0 (2026-07-06)
 
-bitchat-rs is a Rust/GPUI reimplementation targeting Linux, not a code fork.
+backchat is a Rust/GPUI reimplementation targeting Linux, not a code fork.
 Upstream commits are never merged; the upstream remote exists only for
 diffing. When upstream changes, this file decides whether we care.
 
@@ -26,21 +26,21 @@ changes, to figure out *why*.
 2. For every touched file in the **Wire-behavior map** below:
    a. Update `protocol/` notes (our mirror of the relevant spec section).
    b. Port changed/new test vectors into `fixtures/` (JSON, hex strings).
-   c. Make `bitchat-core` tests pass against the new fixtures.
+   c. Make `backchat-core` tests pass against the new fixtures.
 3. Diff `WHITEPAPER.md` — spec changes without code changes are still
    wire changes.
 4. Bump the snapshot hash in this file.
 5. If a *transport semantic* changed (TTL clamps, jitter ranges, dedup
-   windows, fanout rules), re-check `bitchat-core::mesh` — these are
+   windows, fanout rules), re-check `backchat-core::mesh` — these are
    interop-relevant even though no byte format changes.
 
 ## Wire-behavior map
 
-Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
+Upstream path → what it defines → where it lands in backchat → fixtures.
 
 ### localPackages/BitFoundation — the wire-format core (highest value)
 
-| Upstream file | Defines | bitchat-rs module | Fixtures |
+| Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `BinaryProtocol.swift` | packet header v1 (14 B) / v2 (16 B), flag bits, big-endian fields, zlib compression bit + original-size preamble, v2 source route encoding | `core::packet` | `BinaryProtocolTests`, `BinaryProtocolPaddingTests`, `PacketPayloadLimitsTests` |
 | `BitchatPacket.swift` | packet struct; signing representation (TTL=0, no signature, no RSR flag) | `core::packet` | — |
@@ -56,7 +56,7 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 
 ### bitchat/Protocols
 
-| Upstream file | Defines | bitchat-rs module | Fixtures |
+| Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `BitchatProtocol.swift` | `NoisePayloadType` table (first decrypted payload byte): 0x01 pm, 0x02 read receipt, 0x03 delivered, 0x06/0x07 group, 0x08 voice, 0x10/0x11 verify, 0x12 vouch, 0x20 privateFile (0x09 legacy alias: decode-only, never emit), 0x21 authenticatedPeerState | `core::noise_payload` | — |
 | `Packets.swift` | Announcement TLVs (0x01 nickname, 0x02 noise key, 0x03 signing key, 0x04 ≤10 neighbors, 0x05 capabilities, 0x06 bridge geohash; unknown TLVs skipped), `AuthenticatedPeerStatePacket` v1 (strict: rejects non-canonical), `PrivateMessagePacket` TLVs (0x00 id, 0x01 content) | `core::tlv` | `PacketsTests` |
@@ -65,7 +65,7 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 
 ### bitchat/Noise
 
-| Upstream file | Defines | bitchat-rs module | Fixtures |
+| Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `NoiseProtocol.swift` | `Noise_XX_25519_ChaChaPoly_SHA256` handshake, prologue construction, key derivation details | `core::noise` (wraps `snow`) | `NoiseTestVectors.json` (already snow/cacophony format) |
 | `NoiseSession.swift`, `NoiseSessionState.swift`, `SecureNoiseSession.swift` | session semantics: rekey, replay windows, nonce handling | `core::noise::session` | `NoiseCoverageTests` |
@@ -75,7 +75,7 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 
 ### bitchat/Nostr — internet transport
 
-| Upstream file | Defines | bitchat-rs module | Fixtures |
+| Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `NostrEmbeddedBitChat.swift` | `bitchat1:` base64url embedding of whole `BitchatPacket`s (type noiseEncrypted, ttl 7); random unlinkable sender IDs for geohash DMs | `nostr::embedded` | — |
 | Nostr private envelope (see whitepaper §5.3; kind 13 seal → 14 inner → 1059 envelope, one-time outer key) | `v2:` + base64url(24 B nonce ‖ XChaCha20-Poly1305 ct ‖ 16 B tag); keys from secp256k1 ECDH + HKDF-SHA256 reusing "nip44-v2" info label (NOT NIP-44) | `nostr::envelope` | `XChaCha20Poly1305CompatTests`, `bitchatTests/Nostr/Fixtures` |
@@ -85,7 +85,7 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 
 ### bitchat/Noise — session layer (M2)
 
-| Upstream file | Defines | bitchat-rs module | Fixtures |
+| Upstream file | Defines | backchat module | Fixtures |
 |---|---|---|---|
 | `Noise/NoiseProtocol.swift` | Hand-rolled XX: raw 32-B protocol name as `ck`/`h` seed, `mixPreMessageKeys()` → h=SHA256(name), sequential per-key handshake AEAD nonces, transport cipher split (send/recv) | `core::noise_session` | snow cross-checks (`tests/noise_session.rs`, `tests/snow_debug.rs`), `tests/noise_vectors.rs` |
 | `Noise/NoiseCipherState.swift` | Extracted-nonce transport frame `BE32(nonce) ‖ ct ‖ tag`, ChaCha nonce `00000000‖LE64(counter)`, 1024-bit sliding replay window, MAX_SEND_NONCE = u32::MAX−1 | `core::noise_session::{TransportCipher, ReplayWindow}` | same |
@@ -93,7 +93,7 @@ Upstream path → what it defines → where it lands in bitchat-rs → fixtures.
 
 ### BLE mesh engine + link (M2)
 
-| Upstream file | Defines | bitchat-rs module |
+| Upstream file | Defines | backchat module |
 |---|---|---|
 | `Sync/PacketIdUtil.swift`, `Services/BLEPacketDeduplicator`-equivalent | dedup id = SHA-256(type‖sender‖ts BE‖payload), LRU 1000 / 5 min | `ble::dedup` |
 | `BLEFragmentAssemblyBuffer.swift`, `BLEFragmentHandler.swift` | fragment payload `[8B id][2B index][2B total][1B orig type][chunk]`, chunks of the FULL original packet binary, (sender,id) keyed assembly | `ble::fragment` |

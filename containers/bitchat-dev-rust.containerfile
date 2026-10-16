@@ -1,4 +1,4 @@
-# bitchat-rs build image: Fedora at the version the release targets. That is
+# backchat build image: Fedora at the version the release targets. That is
 # a hard pin, not a rolling one: flatpak apps run against their runtime's
 # glibc (freedesktop 25.08 carries 2.42, the Fedora 43 set), so a binary
 # built on a newer Fedora dies with "GLIBC_2.4x not found" inside the

@@ -9,7 +9,7 @@ macro_rules! platforms {
             pub use self::$module::*;
 
             #[cfg(any($(target_os = $platform),*))]
-            // PATCH(bitchat-rs): newer libc dropped the non-standard
+            // PATCH(backchat): newer libc dropped the non-standard
             // ENOATTR on Linux (it is an alias of ENODATA there and only
             // exists on macOS); fall back to ENODATA to keep xattr 0.2.3
             // (via gpui → zed-async-tar) building. Upstream fixed this in

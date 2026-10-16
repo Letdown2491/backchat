@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container-based build for bitchat-rs. The atomic host ships no compiler,
+# Container-based build for backchat. The atomic host ships no compiler,
 # same as orchard's setup: everything builds inside a pinned Fedora 43
 # container (glibc 2.42, what freedesktop 25.08 needs), with the gpui native
 # stack preinstalled (fontconfig, freetype, xkbcommon, clang for bindgen)

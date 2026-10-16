@@ -1,0 +1,26 @@
+[package]
+name = "backchat"
+description = "backchat desktop client: geohash channels over Nostr, GPUI shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "backchat"
+path = "src/main.rs"
+
+[dependencies]
+backchat-core = { path = "../backchat-core" }
+backchat-nostr = { path = "../backchat-nostr" }
+backchat-ble = { path = "../backchat-ble" }
+gpui.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+unicode-segmentation.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand = "0.9"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
