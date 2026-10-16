@@ -164,7 +164,9 @@ impl Engine {
 
         // Relay before processing (TTL decrement), like upstream relays then
         // delivers. Packets addressed to us are terminal — never relayed.
-        if !reassembled && !addressed_to_us && packet.ttl > 1 {
+        // Upstream relays anything with TTL left, including forwarding a
+        // TTL-1 packet as TTL-0 (PacketRelayManager: stop only at 0).
+        if !reassembled && !addressed_to_us && packet.ttl > 0 {
             let mut forward = packet.clone();
             forward.ttl -= 1;
             if let Ok(encoded) = forward.encode(false) {

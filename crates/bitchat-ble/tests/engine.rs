@@ -298,7 +298,7 @@ fn request_sync_gets_stored_packets_back() {
         .drain()
         .into_iter()
         .filter_map(|raw| bitchat_core::packet::Packet::decode(&raw).ok())
-        .filter(|p| p.ttl == 0)
+        .filter(|p| p.ttl == 0 && p.kind != bitchat_core::message_type::MessageType::RequestSync as u8)
         .collect();
     assert!(responses.len() >= 2, "announce + message expected");
     for pkt in &responses {
