@@ -123,23 +123,24 @@ NotReady feeds the wedge/heal path).
 
 More link hygiene we absorb: a connectable advertisement instance is
 consumed (disabled) the moment a peer connects to it, and bluetoothd
-re-arms it only tens of seconds after the link drops, so the link
-re-registers the advertisement on a 30s churn: a fresh connectable
-instance is always on the air, including while a peer holds the
-consumed one, which is what makes multi-peer discovery possible.
-bluer registers once and never observes bluetoothd's Release(), and
-its property reads are session-cached, so polling them cannot detect
-any of this; the registration attempts double as the bluetoothd
-heartbeat. bluetoothd itself can crash (5.87 segfaulted in its
-gatt-database acquire-notify path, twice, seconds after a central
-subscribed - dodged by using the StartNotify property-forwarding
-notify method), which takes our registrations and the session's D-Bus
-connection down with it; three failed registrations flag the session
-dead and the node rebuilds the whole link on a fresh bluer session. A
-connect timeout must check is_connected before cancelling: the peer
-often connects to our advertisement while our Connect is still
-pending, and Device.Disconnect tears down the whole ACL, killing a
-connection that already exists.
+re-arms it only tens of seconds after the link drops. Removing or
+re-registering instances is worse: an unregister aborts any pending
+LE connection attempt. So the link registers several advertisement
+instances up front and never removes them: each inbound connection
+consumes one while the rest keep beaconing, which is what makes
+multi-peer discovery possible. bluer registers without heartbeats and
+its property reads are session-cached, so the watchdog probes
+bluetoothd with a bounded live call every 10s. bluetoothd itself can
+crash (5.87 segfaulted in its gatt-database acquire-notify path,
+twice, seconds after a central subscribed - dodged by using the
+StartNotify property-forwarding notify method), which takes our
+registrations and the session's D-Bus connection down with it; three
+failed probes flag the session dead and the node rebuilds the whole
+link on a fresh bluer session. A connect timeout must check
+is_connected before cancelling: the peer often connects to our
+advertisement while our Connect is still pending, and
+Device.Disconnect tears down the whole ACL, killing a connection that
+already exists.
 
 Upstream's adaptive relay probability (PacketRelayManager, kicks in
 above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported - always
