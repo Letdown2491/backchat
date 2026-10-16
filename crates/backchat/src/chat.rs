@@ -1,7 +1,7 @@
 //! The window: a people rail (spaces + everyone in range), the active
 //! space's conversation, and a composer that routes by space.
 //!
-//! Design model: two public spaces with one hue each, nearby (BLE mesh,
+//! Design model: two public spaces with one hue each, mesh (BLE,
 //! mint) and channel (geohash over relays, sky), plus private
 //! conversations (violet). The rail is the navigation: no back buttons,
 //! no hidden panes; people, presence, and unread are always visible.
@@ -327,7 +327,7 @@ impl Render for ChatView {
         // Header: space identity + one status line of meta.
         let (title, meta, _meta_hue) = match &space {
             Space::Nearby => (
-                "nearby".to_string(),
+                "mesh".to_string(),
                 if restarting {
                     "radio restarting\u{2026}".to_string()
                 } else if !mesh_up {
@@ -393,8 +393,8 @@ impl Render for ChatView {
                     )
                     // spaces
                     .child(space_row(
-                        "nearby",
-                        "\u{25c7} nearby",
+                        "mesh",
+                        "\u{25c7} mesh",
                         MESH,
                         space == Space::Nearby,
                         Some(if restarting {
@@ -863,7 +863,7 @@ impl ChatView {
     if lines.is_empty() || lines.iter().all(|l| matches!(l, ChatLine::System { .. })) {
         let empty: Vec<(&str, String, String)> = match space {
             Space::Nearby => vec![
-                ("\u{25c7}", "nearby".into(), "everyone in bluetooth range, right now".into()),
+                ("\u{25c7}", "mesh".into(), "everyone in bluetooth range, right now".into()),
                 ("", "people appear here automatically as they advertise. on a phone, keep bitchat open with the screen on".into(), String::new()),
                 ("", "say something: it goes to every peer in range, relayed hop by hop".into(), String::new()),
             ],
