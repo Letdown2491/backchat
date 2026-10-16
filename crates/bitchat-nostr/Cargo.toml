@@ -19,7 +19,7 @@ hex.workspace = true
 secp256k1 = { version = "0.31", features = ["rand", "hashes"] }
 base64 = "0.22"
 rand = "0.9"
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", optional = true }
 
