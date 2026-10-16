@@ -121,6 +121,20 @@ fresh). Central connects are patient (30s per-address backoff; connect
 timeouts to absent phones are normal misses, only adapter-level
 NotReady feeds the wedge/heal path).
 
+More link hygiene we absorb: bluer registers the advertisement once
+and never observes bluetoothd's Release(), so a dropped instance stays
+dropped silently (measured: ActiveInstances 0 while the handle looked
+alive). The link watches bluetoothd's active-instance count and
+re-registers on zero. bluetoothd itself can crash (5.87 segfaulted in
+its gatt-database acquire-notify path while a central subscribed),
+which takes our registrations and the session's D-Bus connection down
+with it; the watchdog flags an unanswerable adapter and the node
+rebuilds the whole link on a fresh bluer session. A connect timeout
+must check is_connected before cancelling: the peer often connects to
+our advertisement while our Connect is still pending, and
+Device.Disconnect tears down the whole ACL, killing a connection that
+already exists.
+
 Upstream's adaptive relay probability (PacketRelayManager, kicks in
 above 10 peers: 0.85 @ ≤30 … 0.4 @ >100) is also not ported - always
 relay below that scale.

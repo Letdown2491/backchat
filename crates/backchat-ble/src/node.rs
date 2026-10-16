@@ -124,11 +124,15 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
 
         let mut last_inbound_ms = now_ms();
-        let mut link = match link::spawn(&link_config, false).await {
-            Ok(link) => link,
-            Err(e) => {
-                eprintln!("node: link failed to start: {e}");
-                return;
+        let mut link = loop {
+            match link::spawn(&link_config, false).await {
+                Ok(link) => break link,
+                Err(e) => {
+                    // bluetoothd may still be starting (or down entirely):
+                    // keep trying rather than giving up on the radio.
+                    eprintln!("node: link failed to start ({e}): retrying in 10s");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
             }
         };
 
@@ -137,32 +141,48 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
         }
 
         loop {
-            // Heal check: the link has been reporting adapter-level failures
-            // (NotReady) and nothing has arrived inbound for a long while:
-            // the adapter is wedged. Rebuild the radio around a power cycle;
-            // the engine (identity, sessions, registry) survives untouched.
+            // Heal checks. Two failure shapes reach here:
+            //
+            // D-Bus dead: bluetoothd crashed or restarted and took the
+            // session's D-Bus connection with it. Everything the link does
+            // runs through that connection, so only a full rebuild with a
+            // fresh bluer session recovers; keep the engine (identity,
+            // sessions, registry) untouched.
+            //
+            // Adapter wedged: the link has been reporting adapter-level
+            // failures (NotReady) and nothing has arrived inbound for a long
+            // while. Rebuild the radio around a power cycle.
             {
                 let now = now_ms();
                 let wedged = link.wedge_failures.load(std::sync::atomic::Ordering::Relaxed);
                 let silent_for = now.saturating_sub(last_inbound_ms);
-                if wedged >= 2 && silent_for > 120_000 {
-                    eprintln!(
-                        "node: adapter wedged ({wedged} hard failures, no inbound for {:.0}s): restarting the link",
-                        silent_for / 1000
-                    );
+                let dbus_dead = link.dbus_dead.load(std::sync::atomic::Ordering::Relaxed);
+                if dbus_dead || (wedged >= 2 && silent_for > 120_000) {
+                    if dbus_dead {
+                        eprintln!("node: D-Bus session dead (bluetoothd restarted or crashed): rebuilding the link");
+                    } else {
+                        eprintln!(
+                            "node: adapter wedged ({wedged} hard failures, no inbound for {:.0}s): restarting the link",
+                            silent_for / 1000
+                        );
+                    }
                     link.task.abort();
                     link.discovery.abort();
-                    link = match link::spawn(&link_config, true).await {
+                    link = match link::spawn(&link_config, !dbus_dead).await {
                         Ok(link) => {
                             last_inbound_ms = now_ms();
                             let _ = events_tx
-                                .send(MeshEvent::RadioRestarted { heal: true })
+                                .send(MeshEvent::RadioRestarted { heal: !dbus_dead })
                                 .await;
                             link
                         }
                         Err(e) => {
-                            eprintln!("node: link restart failed: {e}");
-                            return;
+                            // bluetoothd may not be back yet: keep the old
+                            // handle (its flag stays set) and let the heal
+                            // check retry on the next pass.
+                            eprintln!("node: link restart failed ({e}): retrying in 10s");
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            continue;
                         }
                     };
                 }
@@ -183,8 +203,9 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
                                 link
                             }
                             Err(e) => {
-                                eprintln!("node: link restart failed: {e}");
-                                return;
+                                eprintln!("node: link restart failed ({e}): retrying in 10s");
+                                tokio::time::sleep(Duration::from_secs(10)).await;
+                                continue;
                             }
                         };
                         continue;

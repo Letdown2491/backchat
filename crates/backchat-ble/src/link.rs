@@ -90,6 +90,10 @@ pub struct LinkHandle {
     /// Consecutive adapter-level connect failures (NotReady) that suggest
     /// the adapter itself is wedged; cleared on any successful connect.
     pub wedge_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set when the bluer session's D-Bus connection stops answering
+    /// (bluetoothd crash or restart takes it down). The node rebuilds the
+    /// whole link, including a fresh bluer session, when it sees this.
+    pub dbus_dead: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The outbound pump task.
     pub task: tokio::task::JoinHandle<()>,
     /// The discovery task.
@@ -184,6 +188,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     // calls fail with "In Progress".
     let connect_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let wedge_failures = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let dbus_dead = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(256);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(256);
 
@@ -197,6 +202,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
     let adv_nickname = config.nickname.clone();
     let adv_watchdog = {
         let adapter = adapter.clone();
+        let dbus_dead = dbus_dead.clone();
         tokio::spawn(async move {
             loop {
                 let advertisement = Advertisement {
@@ -219,15 +225,40 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                 };
                 eprintln!("{} peripheral: advertising as {:?}", ts(), adv_nickname);
                 // Hold the handle until bluetoothd reports no active
-                // instances: two consecutive zero readings, so a mid-flight
-                // registration does not look like a release.
+                // instances (two consecutive zero readings, so a mid-flight
+                // registration does not look like a release), or until the
+                // adapter stops answering entirely: bluetoothd crashing or
+                // restarting takes our registrations and our session's
+                // D-Bus connection with it. Poll errors cannot be ridden
+                // out forever, because everything the link does runs
+                // through that one connection: three in a row means the
+                // session is dead and only a full link rebuild (fresh
+                // bluer session) recovers.
                 let mut zeros = 0;
+                let mut errs = 0;
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     match adapter.active_advertising_instances().await {
-                        Ok(0) => zeros += 1,
-                        Ok(_) => zeros = 0,
-                        Err(_) => {} // transient D-Bus hiccup: keep holding
+                        Ok(0) => {
+                            zeros += 1;
+                            errs = 0;
+                        }
+                        Ok(_) => {
+                            zeros = 0;
+                            errs = 0;
+                        }
+                        Err(_) => {
+                            zeros = 0;
+                            errs += 1;
+                            if errs >= 3 {
+                                eprintln!(
+                                    "{} peripheral: adapter unreachable over D-Bus for 15s (bluetoothd restarted or crashed): flagging the session for a rebuild",
+                                    ts()
+                                );
+                                dbus_dead.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return;
+                            }
+                        }
                     }
                     if zeros >= 2 {
                         eprintln!(
@@ -660,6 +691,7 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
         inbound_rx,
         outbound_tx,
         wedge_failures,
+        dbus_dead,
         task,
         discovery,
         _adv_watchdog: adv_watchdog,
@@ -750,24 +782,43 @@ async fn run_remote(
                         return Err(err);
                     }
                     Err(_) => {
-                        eprintln!(
-                            "{} remote {}: connect timed out after {CONNECT_TIMEOUT_SECS}s (address stale or peer not advertising), cancelling",
-                            ts(), device.address()
-                        );
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            device.disconnect(),
-                        ).await;
-                        if retries > 0 {
-                            retries -= 1;
-                            tokio::time::sleep(Duration::from_millis(backoff)).await;
-                            backoff *= 2;
-                            continue;
+                        // The reply never came, but the peer may have
+                        // connected to us meanwhile: it connects to our
+                        // advertisement while our Connect is still pending,
+                        // and bluetoothd does not always coalesce the two.
+                        // Disconnect tears down the whole ACL and would
+                        // kill a connection that already exists, so only
+                        // cancel when nothing is actually connected.
+                        match device.is_connected().await {
+                            Ok(true) => {
+                                eprintln!(
+                                    "{} remote {}: connect reply late but the device is connected: keeping the link",
+                                    ts(),
+                                    device.address()
+                                );
+                                break;
+                            }
+                            _ => {
+                                eprintln!(
+                                    "{} remote {}: connect timed out after {CONNECT_TIMEOUT_SECS}s (address stale or peer not advertising), cancelling",
+                                    ts(), device.address()
+                                );
+                                let _ = tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    device.disconnect(),
+                                ).await;
+                                if retries > 0 {
+                                    retries -= 1;
+                                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                                    backoff *= 2;
+                                    continue;
+                                }
+                                return Err(bluer::Error::from(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "connect timed out",
+                                )));
+                            }
                         }
-                        return Err(bluer::Error::from(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "connect timed out",
-                        )));
                     }
                 }
             }
