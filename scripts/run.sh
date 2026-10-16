@@ -28,6 +28,7 @@ exec podman run --rm -i --userns=keep-id \
   -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
   -e XDG_DATA_HOME=/work/.data \
   -e BACKCHAT_DEBUG="${BACKCHAT_DEBUG:-}" \
+  -e BACKCHAT_NO_CENTRAL="${BACKCHAT_NO_CENTRAL:-}" \
   -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
   localhost/bitchat-dev-rust \
   ./target/debug/backchat

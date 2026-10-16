@@ -117,6 +117,15 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
 
     let service_uuid = config.network.service_uuid();
 
+    // Diagnostic: BACKCHAT_NO_CENTRAL=1 runs peripheral-only (advertise +
+    // GATT, never connect out). The phone connects to our advertisement;
+    // this isolates whether our own central attempts (which BlueZ aborts
+    // with le-connection-abort-by-local) are suppressing it.
+    let central_enabled = std::env::var_os("BACKCHAT_NO_CENTRAL").is_none();
+    if !central_enabled {
+        eprintln!("{} link: central role disabled (BACKCHAT_NO_CENTRAL): peripheral only", ts());
+    }
+
     let links = std::sync::Arc::new(tokio::sync::Mutex::new(Links {
         writers: Vec::new(),
         remotes: HashMap::new(),
@@ -250,6 +259,32 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     }
                                     blocked.remove(&addr);
                                 }
+                            }
+                            if !central_enabled {
+                                // Peripheral-only: just note the sighting,
+                                // throttled by a 15s cooldown in the same
+                                // table used for connect backoff.
+                                let mut blocked = blocked.lock().await;
+                                if blocked.get(&addr).copied().unwrap_or(0) <= now_ms {
+                                    blocked.insert(addr, now_ms + 15_000);
+                                    let device = adapter.device(addr);
+                                    let name = match &device {
+                                        Ok(d) => d.name().await.ok().flatten().unwrap_or_default(),
+                                        Err(_) => String::new(),
+                                    };
+                                    let rssi = match &device {
+                                        Ok(d) => d.rssi().await.ok().flatten(),
+                                        Err(_) => None,
+                                    };
+                                    let rssi = rssi
+                                        .map(|r| format!("{r} dBm"))
+                                        .unwrap_or_else(|| "rssi n/a".into());
+                                    eprintln!(
+                                        "{} discovery: bitchat peer at {} (name {name:?}, {rssi}) advertising",
+                                        ts(), addr
+                                    );
+                                }
+                                continue;
                             }
                             let link_table = links.lock().await;
                             if link_table.remotes.contains_key(&addr) {
