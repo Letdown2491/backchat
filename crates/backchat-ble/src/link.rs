@@ -286,11 +286,18 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
 
     // ---- Central: scan for peers advertising the service -------------------
     let blocked = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::<bluer::Address, u64>::new()));
+    // Fresh peer sightings waiting for the serialized connect slot: address
+    // → (last rssi, last seen ms). The scheduler always picks the strongest
+    // signal, so a desk-side phone outranks neighbors across the wall.
+    let pending = std::sync::Arc::new(tokio::sync::Mutex::new(
+        HashMap::<bluer::Address, (Option<i16>, u64)>::new(),
+    ));
     let discovery = {
         let links = links.clone();
-        let inbound_tx = inbound_tx.clone();
         let blocked = blocked.clone();
-        let wedge_failures = wedge_failures.clone();
+        let adapter = adapter.clone();
+        let pending = pending.clone();
+        let connect_lock = connect_lock.clone();
         let own_address = adapter.address().await.unwrap_or_default();
         tokio::spawn(async move {
             let filter = DiscoveryFilter {
@@ -375,7 +382,6 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                 continue;
                             }
                             drop(link_table);
-                            let links = links.clone();
                             let device = match adapter.device(addr) {
                                 Ok(device) => device,
                                 Err(_) => continue,
@@ -394,83 +400,11 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
                                     continue;
                                 }
                             }
-                            crate::radio_log!(
-                                "{} discovery: bitchat peer at {} (name {:?}): connecting as central",
-                                ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
-                            );
-                            let inbound = inbound_tx.clone();
-                            let connect_lock = connect_lock.clone();
-                            let wedge_failures = wedge_failures.clone();
-                            let blocked = blocked.clone();
-                            let (remote_tx, remote_rx) = mpsc::channel::<Vec<u8>>(64);
-                            links.lock().await.remotes.insert(addr, remote_tx.clone());
-                            tokio::spawn(async move {
-                                let mut remote_rx = remote_rx;
-                                let result = run_remote(
-                                    &device,
-                                    service_uuid,
-                                    &mut remote_rx,
-                                    &inbound,
-                                    &links,
-                                    &connect_lock,
-                                    &wedge_failures,
-                                )
-                                .await;
-                                if let Err(ref err) = result {
-                                    // Classify the failure: a busy BlueZ
-                                    // ("In Progress", "Busy") is transient; a
-                                    // connect timeout to an absent phone is a
-                                    // normal mesh miss (NOT a wedge: it was
-                                    // over-counting and power-cycling the
-                                    // adapter on ordinary misses); "NotReady"
-                                    // means the adapter itself is sick.
-                                    let msg = err.to_string();
-                                    let (wedge, cooldown) = if msg.contains("InProgress")
-                                        || msg.contains("Busy")
-                                    {
-                                        (false, TRANSIENT_BACKOFF_MS)
-                                    } else if msg.contains("NotReady") {
-                                        (true, CONNECT_BACKOFF_MS)
-                                    } else {
-                                        (false, CONNECT_BACKOFF_MS)
-                                    };
-                                    if wedge {
-                                        // The node watches this counter with
-                                        // inbound silence and power-cycles.
-                                        wedge_failures
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    let now_ms = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0);
-                                    let mut blocked = blocked.lock().await;
-                                    if !blocked.contains_key(&addr)
-                                        && blocked.len() >= MAX_BLOCKED_ADDRESSES
-                                    {
-                                        if let Some(oldest) = blocked
-                                            .iter()
-                                            .min_by_key(|(_, t)| **t)
-                                            .map(|(a, _)| *a)
-                                        {
-                                            blocked.remove(&oldest);
-                                        }
-                                    }
-                                    blocked.insert(addr, now_ms + cooldown);
-                                }
-                                if let Err(ref err) = result {
-                                    eprintln!("{} remote {}: link ended: {err}", ts(), device.address());
-                                } else {
-                                    eprintln!("{} remote {}: link ended: connected session finished", ts(), device.address());
-                                }
-                                let mut links = links.lock().await;
-                                links.remotes.remove(&addr);
-                                // The peer routing entry dies with its link;
-                                // the next announce re-learns it.
-                                if let Some(peer) = links.addr_peer.remove(&addr) {
-                                    links.peer_addr.remove(&peer);
-                                }
-                            });
+                            // Queue the sighting; the connect scheduler
+                            // picks the strongest fresh peer each tick.
+                            let rssi = device.rssi().await.ok().flatten();
+                            let mut pending = pending.lock().await;
+                            pending.insert(addr, (rssi, now_ms));
                         }
                         AdapterEvent::DeviceRemoved(_) => {}
                         _ => {}
@@ -482,6 +416,139 @@ pub async fn spawn(config: &MeshConfig, heal_power_cycle: bool) -> Result<LinkHa
             }
         })
     };
+
+    // ---- Connect scheduler: strongest fresh sighting gets the slot ---------
+    {
+        let adapter = adapter.clone();
+        let links = links.clone();
+        let inbound_tx = inbound_tx.clone();
+        let blocked = blocked.clone();
+        let pending = pending.clone();
+        let wedge_failures = wedge_failures.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let best = {
+                    let mut pending = pending.lock().await;
+                    pending.retain(|_, (_, seen)| now_ms.saturating_sub(*seen) < 30_000);
+                    // No rssi property yet ranks weakest so a measured peer wins.
+                    let best = pending
+                        .iter()
+                        .max_by_key(|(_, (rssi, _))| rssi.unwrap_or(-120))
+                        .map(|(addr, (rssi, _))| (*addr, *rssi));
+                    if let Some((addr, _)) = best {
+                        pending.remove(&addr);
+                    }
+                    best
+                };
+                let Some((addr, best_rssi)) = best else { continue };
+                // A connect procedure owns the slot; leave the sighting
+                // decision to a later tick rather than queue another task
+                // behind the lock.
+                if connect_lock.try_lock().is_err() {
+                    pending.lock().await.insert(addr, (best_rssi, now_ms));
+                    continue;
+                }
+                let device = match adapter.device(addr) {
+                    Ok(device) => device,
+                    Err(_) => continue,
+                };
+                let link_table = links.lock().await;
+                if link_table.remotes.contains_key(&addr)
+                    || link_table.remotes.len() >= MAX_CENTRAL_LINKS
+                {
+                    continue;
+                }
+                drop(link_table);
+                let uuids = device.uuids().await.unwrap_or_default().unwrap_or_default();
+                if !uuids.contains(&service_uuid) {
+                    continue;
+                }
+                crate::radio_log!(
+                    "{} discovery: bitchat peer at {} (name {:?}): connecting as central",
+                    ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
+                );
+                let (remote_tx, remote_rx) = mpsc::channel::<Vec<u8>>(64);
+                links.lock().await.remotes.insert(addr, remote_tx.clone());
+                let inbound = inbound_tx.clone();
+                let connect_lock = connect_lock.clone();
+                let wedge_failures = wedge_failures.clone();
+                let blocked = blocked.clone();
+                let links = links.clone();
+                tokio::spawn(async move {
+                    let mut remote_rx = remote_rx;
+                    let result = run_remote(
+                        &device,
+                        service_uuid,
+                        &mut remote_rx,
+                        &inbound,
+                        &links,
+                        &connect_lock,
+                        &wedge_failures,
+                    )
+                    .await;
+                    if let Err(ref err) = result {
+                        // Classify the failure: a busy BlueZ
+                        // ("In Progress", "Busy") is transient; a
+                        // connect timeout to an absent phone is a
+                        // normal mesh miss (NOT a wedge: it was
+                        // over-counting and power-cycling the
+                        // adapter on ordinary misses); "NotReady"
+                        // means the adapter itself is sick.
+                        let msg = err.to_string();
+                        let (wedge, cooldown) = if msg.contains("InProgress")
+                            || msg.contains("Busy")
+                        {
+                            (false, TRANSIENT_BACKOFF_MS)
+                        } else if msg.contains("NotReady") {
+                            (true, CONNECT_BACKOFF_MS)
+                        } else {
+                            (false, CONNECT_BACKOFF_MS)
+                        };
+                        if wedge {
+                            // The node watches this counter with
+                            // inbound silence and power-cycles.
+                            wedge_failures
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let mut blocked = blocked.lock().await;
+                        if !blocked.contains_key(&addr)
+                            && blocked.len() >= MAX_BLOCKED_ADDRESSES
+                        {
+                            if let Some(oldest) = blocked
+                                .iter()
+                                .min_by_key(|(_, t)| **t)
+                                .map(|(a, _)| *a)
+                            {
+                                blocked.remove(&oldest);
+                            }
+                        }
+                        blocked.insert(addr, now_ms + cooldown);
+                    }
+                    if let Err(ref err) = result {
+                        eprintln!("{} remote {}: link ended: {err}", ts(), device.address());
+                    } else {
+                        eprintln!("{} remote {}: link ended: connected session finished", ts(), device.address());
+                    }
+                    let mut links = links.lock().await;
+                    links.remotes.remove(&addr);
+                    // The peer routing entry dies with its link;
+                    // the next announce re-learns it.
+                    if let Some(peer) = links.addr_peer.remove(&addr) {
+                        links.peer_addr.remove(&peer);
+                    }
+                });
+            }
+        });
+    }
 
     // ---- Outbound pump: write every frame to every live link ---------------
     // Peripheral writes carry a timeout: a stalled subscriber must not hold
