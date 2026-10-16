@@ -14,12 +14,6 @@ async fn main() -> bluer::Result<()> {
         address,
         adapter.is_powered().await?
     );
-    let can_adv = bluer::Adapter::are_advertisement_types_supported(
-        &adapter,
-        &[bluer::adv::Type::Peripheral],
-    )
-    .await?;
-    println!("peripheral advertising supported: {can_adv}");
     println!("bluer path OK — D-Bus auth and BlueZ reachable");
     Ok(())
 }

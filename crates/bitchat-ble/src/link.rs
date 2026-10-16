@@ -11,6 +11,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+fn ts() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("[link {:07.3}]", (ms % 1_000_000_000) as f64 / 1000.0)
+}
+
 use bluer::adv::{Advertisement, Type as AdvType};
 use bluer::gatt::local::{
     characteristic_control, Application, Characteristic, CharacteristicControlEvent,
@@ -60,6 +68,9 @@ pub async fn spawn(
         writers: Vec::new(),
         remotes: HashMap::new(),
     }));
+    // BlueZ runs one connection procedure at a time — concurrent Connect
+    // calls fail with "In Progress".
+    let connect_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
 
     // ---- Peripheral: advertisement + local GATT ----------------------------
     let advertisement = Advertisement {
@@ -107,6 +118,7 @@ pub async fn spawn(
             while let Some(event) = char_control.next().await {
                 match event {
                     CharacteristicControlEvent::Write(req) => {
+                        eprintln!("{} peripheral: central write channel opened (mtu {})", ts(), req.mtu());
                         let mtu = req.mtu();
                         if let Ok(mut reader) = req.accept() {
                             let inbound_tx = inbound_tx.clone();
@@ -126,6 +138,7 @@ pub async fn spawn(
                         }
                     }
                     CharacteristicControlEvent::Notify(notifier) => {
+                        eprintln!("{} peripheral: central subscribed to notifications (mtu {})", ts(), notifier.mtu());
                         links.lock().await.writers.push(notifier);
                     }
                 }
@@ -168,14 +181,19 @@ pub async fn spawn(
                             if !uuids.contains(&service_uuid) {
                                 continue;
                             }
+                            eprintln!(
+                                "{} discovery: bitchat peer at {} (name {:?}) — connecting as central",
+                                ts(), addr, device.name().await.ok().flatten().unwrap_or_default()
+                            );
                             let inbound = inbound_tx.clone();
+                            let connect_lock = connect_lock.clone();
                             let (remote_tx, remote_rx) = mpsc::channel::<Vec<u8>>(64);
                             links.lock().await.remotes.insert(addr, remote_tx.clone());
                             tokio::spawn(async move {
-                                let _ = run_remote(
-                                    device, service_uuid, remote_rx, inbound,
-                                )
-                                .await;
+                                let mut remote_rx = remote_rx;
+                                let result =
+                                    run_remote(&device, service_uuid, &mut remote_rx, &inbound, &connect_lock).await;
+                                eprintln!("{} remote {}: link ended: {result:?}", ts(), device.address());
                                 links.lock().await.remotes.remove(&addr);
                             });
                         }
@@ -191,11 +209,19 @@ pub async fn spawn(
     let outbound_task = tokio::spawn(async move {
         while let Some(bytes) = outbound_rx.recv().await {
             let mut links = links.lock().await;
+            eprintln!(
+                "{} transmit: {} bytes → {} peripheral subscriber(s), {} central link(s)",
+                ts(), bytes.len(), links.writers.len(), links.remotes.len()
+            );
             for writer in &mut links.writers {
-                let _ = writer.write_all(&bytes).await;
+                if let Err(e) = writer.write_all(&bytes).await {
+                    eprintln!("{} transmit: peripheral write failed: {e}", ts());
+                }
             }
             for remote in links.remotes.values() {
-                let _ = remote.try_send(bytes.clone());
+                if let Err(e) = remote.try_send(bytes.clone()) {
+                    eprintln!("{} transmit: central write failed: {e}", ts());
+                }
             }
         }
     });
@@ -207,66 +233,138 @@ pub async fn spawn(
 /// Central-role connection to one remote device: acquire write-without-
 /// response IO + notifications, then pump both directions until it goes away.
 async fn run_remote(
-    device: bluer::Device,
+    device: &bluer::Device,
     service_uuid: uuid::Uuid,
-    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
-    inbound_tx: InboundTx,
+    outbound_rx: &mut mpsc::Receiver<Vec<u8>>,
+    inbound_tx: &InboundTx,
+    connect_lock: &tokio::sync::Mutex<()>,
 ) -> bluer::Result<()> {
-    // Connect with retries (upstream also retries).
-    if !device.is_connected().await? {
-        let mut retries = 3;
-        loop {
-            match device.connect().await {
-                Ok(()) => break,
-                Err(err) if retries > 0 => {
-                    retries -= 1;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    let _ = err;
+    {
+        // Serialize connection procedures across all remotes.
+        let _guard = connect_lock.lock().await;
+        eprintln!("{} remote {}: connecting", ts(), device.address());
+        if !device.is_connected().await? {
+            let mut retries = 3;
+            loop {
+                match device.connect().await {
+                    Ok(()) => break,
+                    Err(err) if retries > 0 => {
+                        eprintln!("{} remote {}: connect failed ({err}), retrying", ts(), device.address());
+                        retries -= 1;
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                    }
+                    Err(err) => {
+                        eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
+                        return Err(err);
+                    }
                 }
-                Err(err) => return Err(err),
             }
         }
     }
+    eprintln!("{} remote {}: connected", ts(), device.address());
 
-    // Locate the characteristic.
+    // Locate the characteristic. Right after connect() the remote GATT db
+    // is sometimes not yet resolved — retry briefly before giving up.
     let mut characteristic = None;
-    for service in device.services().await? {
-        if service.uuid().await? != service_uuid {
-            continue;
-        }
-        for char in service.characteristics().await? {
-            if char.uuid().await? == CHARACTERISTIC_UUID {
-                characteristic = Some(char);
-                break;
+    for attempt in 0..10 {
+        for service in device.services().await? {
+            if service.uuid().await? != service_uuid {
+                continue;
             }
+            for char in service.characteristics().await? {
+                if char.uuid().await? == CHARACTERISTIC_UUID {
+                    characteristic = Some(char);
+                    break;
+                }
+            }
+            if characteristic.is_some() { break; }
         }
+        if characteristic.is_some() {
+            break;
+        }
+        eprintln!("{} remote {}: service not resolved yet (attempt {})", ts(), device.address(), attempt);
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let Some(characteristic) = characteristic else {
+        eprintln!("{} remote {}: characteristic never appeared — giving up", ts(), device.address());
         return Ok(());
     };
+    eprintln!("{} remote {}: characteristic found", ts(), device.address());
 
-    let mut write_io = characteristic.write_io().await?;
-    let notify = characteristic.notify().await?;
+    let flags = characteristic.flags().await?;
+    eprintln!(
+        "{} remote {}: char flags — write={} write_without_response={} notify={} indicate={}",
+        ts(), device.address(), flags.write, flags.write_without_response, flags.notify, flags.indicate
+    );
+
+    let notify = match characteristic.notify().await {
+        Ok(n) => {
+            eprintln!("{} remote {}: notification stream acquired", ts(), device.address());
+            n
+        }
+        Err(e) => {
+            eprintln!("{} remote {}: notify FAILED: {e}", ts(), device.address());
+            return Err(e);
+        }
+    };
     pin_mut!(notify);
+
+    // Outbound path: prefer the acquired write-without-response IO (one
+    // syscall per packet, matches upstream); fall back to plain D-Bus
+    // writes when acquisition is refused (some peripherals only accept
+    // write-with-response, or the acquire races).
+    enum Outbound {
+        /// Acquired write-without-response IO.
+        Io(bluer::gatt::CharacteristicWriter),
+        /// Plain D-Bus writes (with response).
+        Direct,
+    }
+    let mut outbound = if flags.write_without_response {
+        match characteristic.write_io().await {
+            Ok(io) => {
+                eprintln!("{} remote {}: write-without-response IO acquired", ts(), device.address());
+                Outbound::Io(io)
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} remote {}: write IO refused ({e}) — falling back to write-with-response",
+                    ts(), device.address()
+                );
+                Outbound::Direct
+            }
+        }
+    } else {
+        eprintln!("{} remote {}: char has no write-without-response — using write-with-response", ts(), device.address());
+        Outbound::Direct
+    };
 
     loop {
         tokio::select! {
             value = notify.next() => {
                 match value {
                     Some(bytes) => {
+                        eprintln!("{} remote {}: notification ({} bytes)", ts(), device.address(), bytes.len());
                         if inbound_tx.send(bytes).await.is_err() {
                             return Ok(());
                         }
                     }
-                    None => return Ok(()), // unsubscribed / disconnected
+                    None => {
+                        eprintln!("{} remote {}: notification stream ended (disconnected)", ts(), device.address());
+                        return Ok(()); // unsubscribed / disconnected
+                    }
                 }
             }
             bytes = outbound_rx.recv() => {
                 match bytes {
                     Some(bytes) => {
-                        // write_io is unbuffered; single write per packet.
-                        if write_io.write(&bytes).await.is_err() {
-                            return Ok(());
+                        let result = match &mut outbound {
+                            Outbound::Io(io) => io.write(&bytes).await.map(|n| n == bytes.len()),
+                            Outbound::Direct => characteristic.write(&bytes).await.map(|_| true).map_err(std::io::Error::other),
+                        };
+                        match result {
+                            Ok(true) => {}
+                            Ok(false) => eprintln!("{} remote {}: short write", ts(), device.address()),
+                            Err(e) => eprintln!("{} remote {}: write FAILED: {e}", ts(), device.address()),
                         }
                     }
                     None => return Ok(()),

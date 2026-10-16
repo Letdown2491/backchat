@@ -11,3 +11,5 @@ self/tree/export
 *.key
 publisher.key
 .data/
+.data/
+.cache/
