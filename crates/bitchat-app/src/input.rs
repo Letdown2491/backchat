@@ -260,6 +260,15 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
+    /// Swap the hint shown when the field is empty (no-op when unchanged,
+    /// so calling it every render is free).
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+        }
+    }
+
     pub fn reset(&mut self) {
         self.content = "".into();
         self.selected_range = 0..0;

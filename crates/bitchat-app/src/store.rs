@@ -31,6 +31,17 @@ pub struct DmLine {
     pub timestamp: i64,
 }
 
+/// One row of the conversations list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmOverview {
+    pub peer_id: [u8; 8],
+    pub nickname: String,
+    /// Last message, prefixed "you:" when we sent it.
+    pub preview: String,
+    pub unread: usize,
+    pub online: bool,
+}
+
 struct Peer {
     nickname: Option<String>,
     last_seen: i64,
@@ -55,6 +66,8 @@ pub struct ChatStore {
     mesh_peers: HashMap<[u8; 8], (String, i64)>,
     /// Private conversation history per mesh peer, newest last.
     dms: HashMap<[u8; 8], Vec<DmLine>>,
+    /// Unread DM count per peer; cleared when the conversation is opened.
+    unread: HashMap<[u8; 8], usize>,
 }
 
 impl ChatStore {
@@ -78,6 +91,7 @@ impl ChatStore {
             mesh_tx,
             mesh_peers: HashMap::new(),
             dms: HashMap::new(),
+            unread: HashMap::new(),
         }
     }
 
@@ -258,6 +272,7 @@ impl ChatStore {
                     ours: false,
                     timestamp: now_secs(),
                 });
+                *self.unread.entry(sender_id).or_default() += 1;
                 // Keep a pointer in the main log too — the DM pane is
                 // opt-in, so arriving DMs must announce themselves.
                 self.lines.push(ChatLine::System {
@@ -291,16 +306,66 @@ impl ChatStore {
     }
 
     /// Open a private conversation with a peer by nickname. Returns the
-    /// peer for the view to focus.
+    /// peer for the view to focus (silent — the pane title shows the peer).
     pub fn open_dm(&mut self, nick: &str) -> Option<([u8; 8], String)> {
         let (peer_id, name) = self.resolve_peer(nick)?;
-        self.system_line(format!("private chat with {name} — /back returns to the mesh log"));
         Some((peer_id, name))
     }
 
     /// DM history with a peer (newest last).
     pub fn dm_history(&self, peer: &[u8; 8]) -> &[DmLine] {
         self.dms.get(peer).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Clear a peer's unread badge (called when their conversation opens).
+    pub fn mark_dm_read(&mut self, peer: &[u8; 8]) {
+        self.unread.remove(peer);
+    }
+
+    /// Total unread DMs, for the header badge.
+    pub fn total_unread(&self) -> usize {
+        self.unread.values().sum()
+    }
+
+    /// Conversations list: one row per mesh peer, most recent activity
+    /// first. Peers we share a room with but never DM'd show too — a
+    /// conversation is one click away before it exists.
+    pub fn dm_overview(&self, now: i64) -> Vec<DmOverview> {
+        let mut rows: Vec<DmOverview> = self
+            .mesh_peers
+            .iter()
+            .map(|(id, (nick, seen))| {
+                let history = self.dms.get(id);
+                let preview = history
+                    .and_then(|h| h.last())
+                    .map(|last| {
+                        if last.ours {
+                            format!("you: {}", last.content)
+                        } else {
+                            last.content.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| "no messages yet".to_string());
+                DmOverview {
+                    peer_id: *id,
+                    nickname: nick.clone(),
+                    preview,
+                    unread: self.unread.get(id).copied().unwrap_or(0),
+                    online: now - seen < 600,
+                }
+            })
+            .collect();
+        // Sort: unread first, then online, then most recent message.
+        rows.sort_by_key(|r| {
+            let last_ts = self
+                .dms
+                .get(&r.peer_id)
+                .and_then(|h| h.last())
+                .map(|l| l.timestamp)
+                .unwrap_or(0);
+            (std::cmp::Reverse(r.unread > 0), std::cmp::Reverse(r.online), std::cmp::Reverse(last_ts))
+        });
+        rows
     }
 
     /// Send a DM to a resolved peer and echo it into the conversation.
@@ -464,6 +529,14 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert!((history[0].ours, !history[1].ours) == (true, true));
         assert!(store.dm_history(&[1u8; 8]).is_empty());
+
+        // Unread accounting: one arrived, opening the conversation clears it.
+        assert_eq!(store.total_unread(), 1);
+        let overview = store.dm_overview(now_secs());
+        assert_eq!(overview.len(), 1);
+        assert_eq!((overview[0].unread, overview[0].preview.as_str()), (1, "hello back"));
+        store.mark_dm_read(&peer);
+        assert_eq!(store.total_unread(), 0);
 
         // The DM went out over the mesh, and the main log only carries a
         // pointer to the conversation, not the content.
