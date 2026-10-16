@@ -6,8 +6,8 @@ use crate::store::{ChatLine, ChatStore};
 use bitchat_ble::engine::MeshEvent;
 use bitchat_nostr::relay::RelayEvent;
 use gpui::{
-    div, list, prelude::*, px, rgb, App, Context, Entity, Focusable, FontWeight, ListAlignment,
-    ListState, ParentElement, Render, Styled, Window,
+    div, prelude::*, px, rgb, App, Context, Entity, Focusable, FontWeight, ParentElement, Render,
+    ScrollHandle, Styled, Window,
 };
 
 const BG: u32 = 0x101418;
@@ -21,10 +21,10 @@ const INPUT_BG: u32 = 0x1a2028;
 pub struct ChatView {
     store: Entity<ChatStore>,
     input: Entity<TextInput>,
-    /// Variable-height chat log (uniform_list assumes equal item heights and
-    /// clips message bodies of older entries — this bug is why only the
-    /// newest message rendered fully).
-    lines_list: ListState,
+    /// Plain scrollable log — no virtualization (uniform_list assumed equal
+    /// item heights and clipped message bodies; virtualized list flakes too).
+    log_scroll: ScrollHandle,
+    last_line_count: usize,
 }
 
 impl ChatView {
@@ -87,7 +87,8 @@ impl ChatView {
         Self {
             store,
             input,
-            lines_list: ListState::new(0, ListAlignment::Bottom, px(64.)),
+            log_scroll: ScrollHandle::new(),
+            last_line_count: 0,
         }
     }
 
@@ -161,13 +162,13 @@ impl Render for ChatView {
         });
         let lines: Vec<ChatLine> = self.store.update(cx, |store, _| store.lines.clone());
         let line_count = lines.len();
-        // Append only new items so the Bottom-aligned chat log keeps its
-        // scroll position and follows the tail.
-        let rendered = self.lines_list.item_count();
-        if rendered > line_count {
-            self.lines_list.reset(line_count);
-        } else if line_count > rendered {
-            self.lines_list.splice(rendered..rendered, line_count - rendered);
+        if line_count != self.last_line_count {
+            // Follow the tail: minimally reveal the newest line each frame
+            // the log grows.
+            if line_count > 0 {
+                self.log_scroll.scroll_to_item(line_count - 1);
+            }
+            self.last_line_count = line_count;
         }
 
         div()
@@ -233,58 +234,55 @@ impl Render for ChatView {
             // Message pane
             .child(
                 div()
+                    .id("log")
                     .flex_1()
                     .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        list(self.lines_list.clone(), move |ix, _window, _cx| {
-                            match &lines[ix] {
-                                        ChatLine::System { text } => div()
-                                            .px_3()
-                                            .text_size(px(12.))
-                                            .italic()
-                                            .text_color(rgb(FG_DIM))
-                                            .child(text.clone())
-                                            .into_any_element(),
-                                        ChatLine::Message { sender, content, ours, timestamp } => {
-                                            let bg = if *ours { BG_MINE } else { BG };
+                    .overflow_y_scroll()
+                    .track_scroll(&self.log_scroll)
+                    .flex()
+                    .flex_col()
+                    .children(lines.iter().map(|line| match line {
+                        ChatLine::System { text } => div()
+                            .px_3()
+                            .text_size(px(12.))
+                            .italic()
+                            .text_color(rgb(FG_DIM))
+                            .child(text.clone())
+                            .into_any_element(),
+                        ChatLine::Message { sender, content, ours, timestamp } => {
+                            let bg = if *ours { BG_MINE } else { BG };
+                            div()
+                                .px_3()
+                                .py_1()
+                                .mr_2()
+                                .bg(rgb(bg))
+                                .rounded(px(6.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .items_baseline()
+                                        .child(
                                             div()
-                                                .px_3()
-                                                .py_1()
-                                                .mr_2()
-                                                .bg(rgb(bg))
-                                                .rounded(px(6.))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_row()
-                                                        .gap_2()
-                                                        .items_baseline()
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(12.))
-                                                                .text_color(rgb(ACCENT))
-                                                                .font_weight(FontWeight::SEMIBOLD)
-                                                                .child(sender.clone()),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(11.))
-                                                                .text_color(rgb(FG_DIM))
-                                                                .child(format_time(*timestamp)),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div().text_size(px(14.)).child(content.clone()),
-                                                )
-                                                .into_any_element()
-                                        }
-                                }
-                            },
-                        )
-                        .w_full()
-                        .h_full(),
-                    ),
+                                                .text_size(px(12.))
+                                                .text_color(rgb(ACCENT))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(sender.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(FG_DIM))
+                                                .child(format_time(*timestamp)),
+                                        ),
+                                )
+                                .child(
+                                    div().text_size(px(14.)).child(content.clone()),
+                                )
+                                .into_any_element()
+                        }
+                    })),
             )
             // Input row
             .child(
