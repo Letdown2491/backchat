@@ -4,6 +4,8 @@ A Rust/GPUI reimplementation of [bitchat](https://github.com/permissionlesstech/
 for Linux: bluetooth mesh chat, IRC vibes. Drop-in wire compatible with the
 upstream iOS/Android clients.
 
+![backchat on Linux](self/packaging/screenshots/backchat.png)
+
 Not a code fork: see [PORTING.md](PORTING.md) for how upstream is tracked
 and which Swift files define wire behavior.
 
