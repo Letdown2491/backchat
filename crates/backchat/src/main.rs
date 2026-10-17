@@ -6,6 +6,7 @@
 mod assets;
 mod chat;
 mod input;
+mod niri;
 mod persistence;
 mod store;
 mod titlebar;

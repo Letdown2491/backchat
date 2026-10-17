@@ -507,6 +507,7 @@ dependencies = [
 name = "backchat"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "backchat-ble",
  "backchat-core",
  "backchat-nostr",

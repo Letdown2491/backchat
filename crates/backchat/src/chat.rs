@@ -18,6 +18,7 @@ use gpui::{
     Styled, Window,
 };
 
+use crate::niri;
 use crate::titlebar;
 
 // ---- palette: dark surfaces + one hue per transport ----------------------
@@ -69,6 +70,11 @@ pub struct ChatView {
     /// Channel browser open (the `#` space's discovery view).
     browsing: bool,
     last_browsing: bool,
+    /// niri says the window is tiled (its xdg tiled states are a CSD
+    /// hint only, so the IPC is the only voice that answers). The
+    /// titlebar folds away while this or the compositor's own states
+    /// read tiled.
+    niri_tiled: bool,
 }
 
 impl ChatView {
@@ -153,6 +159,40 @@ impl ChatView {
             .detach();
         }
 
+        // The titlebar fold's niri half. Seeded before the first paint:
+        // niri tiles a window at birth and the window is not in niri's
+        // list until it maps, so the best pre-paint answer is "tiled
+        // while niri is there"; a rule-floated birth corrects within one
+        // tick. No niri (any other desktop) never answers, and the bar
+        // stays. The tick then re-asks on an idle beat: render cannot
+        // tick (an idle window draws no frames), and tiling changes land
+        // without input.
+        let niri_tiled = niri::own_windows().is_ok();
+        {
+            let niri_view = cx.weak_entity();
+            cx.spawn(async move |_, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(2))
+                        .await;
+                    // a failed ask (no niri, restart) keeps the last answer
+                    let own = cx
+                        .background_spawn(async move { niri::own_windows() })
+                        .await;
+                    if let Ok(own) = own {
+                        let tiled = own.iter().any(|w| w.is_floating == Some(false));
+                        let _ = niri_view.update(cx, |view, cx| {
+                            if view.niri_tiled != tiled {
+                                view.niri_tiled = tiled;
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
         let input = cx.new(|cx| TextInput::focused("", "", cx));
         Self {
             store,
@@ -164,6 +204,7 @@ impl ChatView {
             last_space: Space::Nearby,
             browsing: false,
             last_browsing: false,
+            niri_tiled,
         }
     }
 
@@ -705,9 +746,12 @@ impl Render for ChatView {
             .flex_col()
             .size_full()
             // the titlebar folds away while the window is edge-tiled
-            // or maximized: the tile frames the window already
+            // or maximized: the tile frames the window already. niri
+            // answers through the IPC (its xdg tiled states are a CSD
+            // hint only); other compositors answer through the states
+            // where they send them
             .children(
-                (!titlebar::window_is_tiled(window)).then(|| {
+                (!(titlebar::window_is_tiled(window) || self.niri_tiled)).then(|| {
                     titlebar::bar(
                         "backchat".into(),
                         window.window_controls(),
