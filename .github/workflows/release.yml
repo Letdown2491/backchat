@@ -98,11 +98,11 @@ jobs:
       - uses: actions/checkout@v4
 
       # the unpack step drives the bundle through a scratch repo with
-      # ostree; the runner ships neither it nor flatpak
-      - name: Install ostree
+      # flatpak and ostree; the runner ships neither
+      - name: Install flatpak + ostree
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ostree
+          sudo apt-get install -y --no-install-recommends flatpak ostree
 
       - name: Version from the tag
         id: ver
