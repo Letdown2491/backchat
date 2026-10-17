@@ -3,4 +3,4 @@
 # the repository link as verified. Replace the placeholder with the real
 # npub (derived from the publisher nsec held in the ORCHARD_NSEC secret);
 # update it whenever the signing key changes.
-npub1replacewiththepublishersecretkeynpub
+npub1m2jphmdkskgnvwl5gplksl9e0zwv2sldqf9mwlpz6tyymz84g9fsqr3wgu

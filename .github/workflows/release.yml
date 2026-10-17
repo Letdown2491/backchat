@@ -22,7 +22,9 @@ permissions:
 env:
   APP_ID: io.github.Letdown2491.backchat
   # orchard's publish tool, pinned: tag + expected commit (a moved tag fails
-  # the build instead of building something else)
+  # the build instead of building something else). TODO: bump to the tag that
+  # carries the screenshots feature (listings grow `screenshot` tags; older
+  # pins still publish, silently without them).
   ORCHARD_TAG: v0.1.2
   ORCHARD_COMMIT: 087940634e83b436f96591fec4a5cc193c704383
   REGISTRY: ghcr.io/letdown2491/backchat-flatpak
