@@ -16,7 +16,9 @@ and which Swift files define wire behavior.
   embedded packets, the private-envelope scheme.
 - `crates/backchat-ble`: Linux BLE mesh via BlueZ (`bluer`), central +
   peripheral roles.
-- `crates/backchat`: the GPUI client: people rail, transport-hued spaces (nearby / channel / private), composer.
+- `crates/backchat`: the GPUI client: client-side titlebar (folds on
+  tiling, niri included), people rail, transport-hued spaces (nearby /
+  channel / private), composer.
 - `fixtures/`: conformance vectors ported from upstream's test suite.
 - `self/`: flatpak packaging + Orchard publishing
   ([self/packaging/README.md](self/packaging/README.md)); `scripts/build.sh`
@@ -36,6 +38,10 @@ Verified so far:
 - BLE mesh (M2) works end-to-end against real clients: announce, public
   messages, Noise-encrypted DMs, gossip sync, dual-role radio with wedge
   self-heal (see [PORTING.md](PORTING.md) for wire facts).
+- Flatpak packaging + Orchard store publishing are wired: a `v*` tag builds
+  the bundle on CI, pushes the app tree to ghcr, and signs the store's
+  three Nostr events ([self/packaging/README.md](self/packaging/README.md)).
+  The flatpak build's BLE is verified against the phone.
 
 ## Running
 
