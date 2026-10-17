@@ -10,14 +10,15 @@ name = "backchat"
 summary = "Bluetooth mesh chat with IRC vibes"
 description-file = "description.md"
 # Must be a PNG: Orchard caches icons without extensions, and an SVG then
-# fails to render. Absolute URLs: the store fetches them, it cannot read
-# the publisher's disk.
+# fails to render. Absolute URL: the store fetches it over HTTP, it cannot
+# read the publisher's disk.
 icon = "https://raw.githubusercontent.com/Letdown2491/backchat/main/self/packaging/io.github.Letdown2491.backchat.png"
-# Needs orchard >= v0.2.1 (the screenshots feature): earlier publishers
-# silently drop the tags.
-screenshots = [
-    "https://raw.githubusercontent.com/Letdown2491/backchat/main/self/packaging/screenshots/backchat.png",
-]
+# Screenshots (image URLs, one `screenshot` tag each on the listing) are
+# supported from Orchard v0.2.1 (prepared in the orchard repo, not yet
+# pushed); the pinned publisher silently drops the field until then.
+# screenshots = [
+#     "https://raw.githubusercontent.com/Letdown2491/backchat/main/self/packaging/screenshots/backchat.png",
+# ]
 categories = ["Network", "InstantMessaging"]
 license = "Unlicense-1.0"
 repository = "https://github.com/Letdown2491/backchat"
