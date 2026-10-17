@@ -42,14 +42,19 @@ jobs:
       - name: Install flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak ostree
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder ostree elfutils librsvg2-common
+          # elfutils: the debuginfo strip shells out to eu-strip on the
+          # host. librsvg2-common: the appstream compose rasterizes the
+          # app's SVG icon through gdk-pixbuf; without the loader the
+          # compose dies with a file-read-error (Fedora has the loader
+          # system-wide, which is why the local build never saw this).
           flatpak --user remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Install the builder + freedesktop 25.08 + rust sdk extension
+      - name: Install freedesktop 25.08 + rust sdk extension
         run: |
           flatpak --user install -y --noninteractive flathub \
-            org.flatpak.Builder \
             org.freedesktop.Platform//25.08 \
             org.freedesktop.Sdk//25.08 \
             org.freedesktop.Sdk.Extension.rust-stable//25.08
@@ -61,11 +66,7 @@ jobs:
 
       - name: Build the flatpak
         run: |
-          # the Builder app, not the apt flatpak-builder: the strip and the
-          # appstream compose then run in the same sandboxes as the local
-          # builds, and this manifest is proven through them end to end
-          flatpak run --command=flatpak-builder org.flatpak.Builder \
-            --user --force-clean --repo=repo \
+          flatpak-builder --user --force-clean --repo=repo \
             self/tree self/packaging/io.github.Letdown2491.backchat.yml
 
       - name: Bundle

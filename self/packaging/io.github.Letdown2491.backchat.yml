@@ -36,6 +36,11 @@ modules:
         "${FLATPAK_DEST}/share/applications/io.github.Letdown2491.backchat.desktop"
       - install -Dm644 self/packaging/io.github.Letdown2491.backchat.svg
         "${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.Letdown2491.backchat.svg"
+      # the raster beside the scalable: the appstream compose rasterizes
+      # icons for its catalog, and a raster source needs no SVG loader;
+      # the launcher reads either
+      - install -Dm644 self/packaging/io.github.Letdown2491.backchat.png
+        "${FLATPAK_DEST}/share/icons/hicolor/512x512/apps/io.github.Letdown2491.backchat.png"
       - install -Dm644 self/packaging/io.github.Letdown2491.backchat.metainfo.xml
         "${FLATPAK_DEST}/share/metainfo/io.github.Letdown2491.backchat.metainfo.xml"
     sources:
