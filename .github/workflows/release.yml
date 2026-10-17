@@ -88,8 +88,11 @@ jobs:
         # flatpak-builder leaves the app tree staged exactly as a
         # flatpak checkout looks (files/, export/, metadata, var/),
         # which is the tree orchard-publish packs; the bundle has no
-        # part in that
-        run: tar -C self/tree -czf app-tree.tar.gz export files metadata var
+        # part in that. var/run is a symlink to /run in that staging;
+        # the publish tool's size walk follows directory symlinks and
+        # would cross into the host's /run and die on root-only
+        # /run/sudo (orchard's own tree builds var/ without it)
+        run: tar -C self/tree --exclude=var/run -czf app-tree.tar.gz export files metadata var
       - uses: actions/upload-artifact@v4
         with:
           name: app-tree
