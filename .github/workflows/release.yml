@@ -42,16 +42,14 @@ jobs:
       - name: Install flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree elfutils
-          # elfutils: flatpak-builder strips debuginfo by shelling out to
-          # eu-strip on the HOST (a flatpak-Builder build finds it in the
-          # SDK sandbox; a native runner does not)
+          sudo apt-get install -y --no-install-recommends flatpak ostree
           flatpak --user remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
 
-      - name: Install freedesktop 25.08 + rust sdk extension
+      - name: Install the builder + freedesktop 25.08 + rust sdk extension
         run: |
           flatpak --user install -y --noninteractive flathub \
+            org.flatpak.Builder \
             org.freedesktop.Platform//25.08 \
             org.freedesktop.Sdk//25.08 \
             org.freedesktop.Sdk.Extension.rust-stable//25.08
@@ -63,7 +61,11 @@ jobs:
 
       - name: Build the flatpak
         run: |
-          flatpak-builder --user --force-clean --repo=repo \
+          # the Builder app, not the apt flatpak-builder: the strip and the
+          # appstream compose then run in the same sandboxes as the local
+          # builds, and this manifest is proven through them end to end
+          flatpak run --command=flatpak-builder org.flatpak.Builder \
+            --user --force-clean --repo=repo \
             self/tree self/packaging/io.github.Letdown2491.backchat.yml
 
       - name: Bundle
