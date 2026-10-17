@@ -3,14 +3,17 @@
 //! Startup sequence: load/persist device state, spin the tokio runtime on
 //! a background thread, spawn the relay manager, build the store + window.
 
+mod assets;
 mod chat;
 mod input;
 mod persistence;
 mod store;
+mod titlebar;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Application, Bounds, WindowBounds, WindowOptions, px, size,
+    App, Application, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px,
+    size,
 };
 use store::ChatStore;
 
@@ -73,13 +76,23 @@ fn main() {
     let mesh_cmd_tx = mesh.as_ref().map(|m| m.cmd_tx.clone());
     let mesh_events = mesh.map(|m| m.events);
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         cx.bind_keys(input::key_bindings());
 
         let bounds = Bounds::centered(None, size(px(720.), px(760.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // client-side decorations: the compositor frames
+                // nothing, our titlebar owns the row (the Wayland
+                // default is server decorations, which would double-
+                // frame with the bar drawn anyway)
+                window_decorations: Some(WindowDecorations::Client),
+                // the compositor reads this for the taskbar title
+                titlebar: Some(TitlebarOptions {
+                    title: Some("backchat".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             move |_, cx| {

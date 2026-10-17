@@ -18,6 +18,8 @@ use gpui::{
     Styled, Window,
 };
 
+use crate::titlebar;
+
 // ---- palette: dark surfaces + one hue per transport ----------------------
 const BG: u32 = 0x0b0e12; // window
 const SURFACE: u32 = 0x12161c; // rail, composer field
@@ -250,7 +252,7 @@ impl Focusable for ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = crate::store::now_secs();
         let (people, mesh_peers, mesh_up, restarting, relays, here, geohash, unread) =
             self.store.update(cx, |store, _| {
@@ -373,10 +375,10 @@ impl Render for ChatView {
             ),
         };
 
-        div()
+        let row = div()
             .flex()
             .flex_row()
-            .size_full()
+            .flex_1()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus_handle(cx))
@@ -696,7 +698,35 @@ impl Render for ChatView {
                                     .child("\u{25b8}"),
                             ),
                     ),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            // the titlebar folds away while the window is edge-tiled
+            // or maximized: the tile frames the window already
+            .children(
+                (!titlebar::window_is_tiled(window)).then(|| {
+                    titlebar::bar(
+                        "backchat".into(),
+                        window.window_controls(),
+                        titlebar::TitlebarIcons {
+                            minimize: "icons/titlebar_minimize.svg".into(),
+                            maximize: "icons/titlebar_maximize.svg".into(),
+                            close: "icons/titlebar_close.svg".into(),
+                        },
+                        titlebar::TitlebarColors {
+                            background: rgb(SURFACE),
+                            border: rgb(0x1d232c),
+                            title: rgb(DIM),
+                            ink: rgb(DIM),
+                            hover: rgb(RAISED),
+                        },
+                    )
+                }),
             )
+            .child(row)
     }
 }
 
