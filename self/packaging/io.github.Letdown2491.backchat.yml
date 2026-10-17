@@ -4,6 +4,9 @@ runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+# the branch build-export/build-bundle/publish address; flatpak-builder's
+# default is master, which nothing downstream looks at
+default-branch: stable
 command: backchat
 
 finish-args:
