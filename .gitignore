@@ -16,3 +16,6 @@ publisher.key
 .data/
 .data/
 .cache/
+
+# runtime state (device seed = mesh identity, settings churn)
+.local/
