@@ -84,11 +84,16 @@ jobs:
             --generate-notes --verify-tag 2>/dev/null || true
           gh release upload "$GITHUB_REF_NAME" bundles/*.flatpak --clobber
 
-      - name: Save the bundle for the publish job
-        uses: actions/upload-artifact@v4
+      - name: Save the staged tree for the publish job
+        # flatpak-builder leaves the app tree staged exactly as a
+        # flatpak checkout looks (files/, export/, metadata, var/),
+        # which is the tree orchard-publish packs; the bundle has no
+        # part in that
+        run: tar -C self/tree -czf app-tree.tar.gz export files metadata var
+      - uses: actions/upload-artifact@v4
         with:
-          name: flatpak-bundle
-          path: bundles/*.flatpak
+          name: app-tree
+          path: app-tree.tar.gz
           retention-days: 1
 
   orchard:
@@ -97,22 +102,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # the unpack step drives the bundle through a scratch repo with
-      # flatpak and ostree; the runner ships neither
-      - name: Install flatpak + ostree
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak ostree
-
       - name: Version from the tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download the bundle
+      - name: Download the staged tree
         uses: actions/download-artifact@v4
         with:
-          name: flatpak-bundle
-          path: bundles
+          name: app-tree
 
       - name: Build orchard-publish from Orchard's pinned tag
         run: |
@@ -129,13 +126,11 @@ jobs:
           sudo install -m755 target/release/orchard-publish \
             /usr/local/bin/orchard-publish
 
-      - name: Unpack the bundle into the app tree
+      - name: Unpack the staged tree
         run: |
-          mkdir -p /tmp/repo self/tree/app-tree
-          ostree init --repo=/tmp/repo --mode=archive-z2
-          flatpak build-import-bundle /tmp/repo bundles/*.flatpak
-          ostree checkout --repo=/tmp/repo -U \
-            "app/$APP_ID/x86_64/stable" self/tree/app-tree
+          mkdir -p self/tree/app-tree
+          tar -xzf app-tree.tar.gz -C self/tree/app-tree
+          ls self/tree/app-tree
 
       - name: Publish to Orchard (live)
         env:
