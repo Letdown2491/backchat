@@ -113,9 +113,13 @@ jobs:
             https://github.com/Letdown2491/orchard /tmp/orchard
           test "$(git -C /tmp/orchard rev-parse HEAD)" = "$ORCHARD_COMMIT"
           rustup toolchain install stable --profile minimal
-          cargo +stable build --release --locked -p orchard-publish \
-            --manifest-path /tmp/orchard/Cargo.toml
-          sudo install -m755 /tmp/orchard/target/release/orchard-publish \
+          # build from the clone's own directory: cargo reads
+          # .cargo/config.toml from the CWD chain, and the backchat
+          # checkout's config replaces crates-io with backchat's vendored
+          # sources, which do not carry orchard's deps
+          cd /tmp/orchard
+          cargo +stable build --release --locked -p orchard-publish
+          sudo install -m755 target/release/orchard-publish \
             /usr/local/bin/orchard-publish
 
       - name: Unpack the bundle into the app tree
