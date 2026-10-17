@@ -97,6 +97,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # the unpack step drives the bundle through a scratch repo with
+      # ostree; the runner ships neither it nor flatpak
+      - name: Install ostree
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ostree
+
       - name: Version from the tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
