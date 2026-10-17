@@ -55,7 +55,23 @@ one level deeper.
 
 ## Publishing to Orchard
 
-Build an export tree and hand it to Orchard's publisher flow:
+Automated: pushing a tag `v*` runs [.github/workflows/release.yml](../.github/workflows/release.yml),
+which builds the flatpak on the freedesktop 25.08 runtime, attaches the
+bundle to the GitHub release, unpacks it into an app tree, and publishes to
+Orchard with `orchard-publish` (built from Orchard's pinned v0.1.2): the app
+tree goes to `ghcr.io/letdown2491/backchat-flatpak` as an OCI image and three
+Nostr events are signed and sent (listing 32267, release 30063, asset 3063
+pinning the image digest). Secrets it needs:
+
+- `ORCHARD_NSEC`: the publisher's Nostr key. Never in the repo.
+- ghcr pushes use the workflow's `GITHUB_TOKEN` (packages:write); the first
+  push creates the package and it must be flipped to **public** once (Orchard
+  cannot pull a private image).
+
+`orchard.txt` at the repo root names the publisher npub so Orchard shows the
+repository link as verified: keep it in step with the signing key.
+
+Manual (any machine with flatpak + ostree, for re-publishing without a tag):
 
 ```
 flatpak run --command=flatpak-builder org.flatpak.Builder \
@@ -67,8 +83,4 @@ flatpak build-bundle self/tree/export \
   backchat-0.1.0.flatpak io.github.Letdown2491.backchat stable
 ```
 
-For a source build on Orchard's side, the manifest needs two edits:
-swap the local `dir` source for the git URL + tag, and keep the vendor
-directory reachable (commit it to the publish branch, or generate it in
-a prep module). The `*.key` files for repo signing never enter this
-repository (gitignored).
+The `*.key` files for repo signing never enter this repository (gitignored).

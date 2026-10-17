@@ -1,0 +1,40 @@
+# Orchard (https://github.com/Letdown2491/orchard) listing for the Flatpak.
+#
+# Read by `orchard-publish`. The CI release workflow (.github/workflows/
+# release.yml) runs it on tags; self/packaging/README.md has the manual loop.
+# ORCHARD_PUBLISH_VERSION (set from the tag) overrides [release] version.
+
+[app]
+id = "io.github.Letdown2491.backchat"
+name = "backchat"
+summary = "Bluetooth mesh chat with IRC vibes"
+description-file = "description.md"
+# Must be a PNG: Orchard caches icons without extensions, and an SVG then
+# fails to render.
+icon = "io.github.Letdown2491.backchat.png"
+categories = ["Network", "InstantMessaging"]
+license = "Unlicense-1.0"
+repository = "https://github.com/Letdown2491/backchat"
+homepage = "https://github.com/Letdown2491/backchat"
+
+[release]
+# Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
+version = "0.1.0"
+channel = "stable"
+arch = "linux-x86_64"
+platforms = ["linux-x86_64"]
+# Keep in step with runtime-version in the flatpak manifest.
+runtime = "org.freedesktop.Platform/x86_64/25.08"
+notes = "Release notes: https://github.com/Letdown2491/backchat/releases"
+
+[artifact]
+# Extracted from the release bundle before orchard-publish runs; gitignored.
+tree = "../tree/app-tree"
+
+[publish]
+# relay.orchard.rocks must come first: orchard-publish refuses a manifest
+# without it.
+relays = ["wss://relay.orchard.rocks", "wss://nos.lol", "wss://relay.primal.net"]
+tag = "latest"
+# No author-name or nip05: either one makes orchard-publish sign a kind 0
+# profile, which would replace the publisher's Nostr profile.

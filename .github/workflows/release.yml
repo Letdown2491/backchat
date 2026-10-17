@@ -1,0 +1,132 @@
+# Release: tag v* builds the flatpak, attaches it to the GitHub release,
+# then publishes to Orchard (the Nostr flatpak store, github.com/Letdown2491/
+# orchard) with orchard-publish.
+#
+# Secrets:
+#   ORCHARD_NSEC            the publisher's Nostr key (never in the repo)
+#   ORCHARD_REGISTRY_*      optional ghcr credentials; GITHUB_TOKEN works for
+#                           ghcr.io/Letdown2491 via packages:write
+#
+# orchard.txt at the repo root names the publisher npub: update it if the
+# signing key ever changes (Orchard reads it to show the repo link verified).
+
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  APP_ID: io.github.Letdown2491.backchat
+  # orchard's publish tool, pinned: tag + expected commit (a moved tag fails
+  # the build instead of building something else)
+  ORCHARD_TAG: v0.1.2
+  ORCHARD_COMMIT: 087940634e83b436f96591fec4a5cc193c704383
+  REGISTRY: ghcr.io/letdown2491/backchat-flatpak
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree
+          flatpak --user remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install freedesktop 25.08 + rust sdk extension
+        run: |
+          flatpak --user install -y --noninteractive flathub \
+            org.freedesktop.Platform//25.08 \
+            org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Vendor crate sources (flatpak builds offline)
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable vendor vendor
+
+      - name: Build the flatpak
+        run: |
+          flatpak-builder --user --force-clean --repo=repo \
+            self/tree self/packaging/io.github.Letdown2491.backchat.yml
+
+      - name: Bundle
+        run: |
+          mkdir -p bundles
+          flatpak build-bundle repo \
+            "bundles/backchat-${{ steps.ver.outputs.version }}-linux-x86_64.flatpak" \
+            "$APP_ID" stable
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+            --generate-notes --verify-tag 2>/dev/null || true
+          gh release upload "$GITHUB_REF_NAME" bundles/*.flatpak --clobber
+
+      - name: Save the bundle for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-bundle
+          path: bundles/*.flatpak
+          retention-days: 1
+
+  orchard:
+    needs: flatpak
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: flatpak-bundle
+          path: bundles
+
+      - name: Build orchard-publish from Orchard's pinned tag
+        run: |
+          git clone --quiet --depth 1 --branch "$ORCHARD_TAG" \
+            https://github.com/Letdown2491/orchard /tmp/orchard
+          test "$(git -C /tmp/orchard rev-parse HEAD)" = "$ORCHARD_COMMIT"
+          rustup toolchain install stable --profile minimal
+          cargo +stable build --release --locked -p orchard-publish \
+            --manifest-path /tmp/orchard/Cargo.toml
+          sudo install -m755 /tmp/orchard/target/release/orchard-publish \
+            /usr/local/bin/orchard-publish
+
+      - name: Unpack the bundle into the app tree
+        run: |
+          mkdir -p /tmp/repo self/tree/app-tree
+          ostree init --repo=/tmp/repo --mode=archive-z2
+          flatpak build-import-bundle /tmp/repo bundles/*.flatpak
+          ostree checkout --repo=/tmp/repo -U \
+            "app/$APP_ID/x86_64/stable" self/tree/app-tree
+
+      - name: Publish to Orchard (live)
+        env:
+          ORCHARD_PUBLISH_VERSION: ${{ steps.ver.outputs.version }}
+          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
+          ORCHARD_REGISTRY_USER: ${{ github.actor }}
+          ORCHARD_REGISTRY_PASSWORD: ${{ github.token }}
+        run: |
+          cd self/packaging
+          orchard-publish "io.github.Letdown2491.backchat.publish.toml" \
+            --arch linux-x86_64 \
+            --registry "$REGISTRY" --tag "latest-linux-x86_64" \
+            --out /tmp/orchard-out

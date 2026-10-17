@@ -1,0 +1,6 @@
+# Orchard publisher proof: names the npub whose key signs this app's
+# Orchard releases. Orchard reads this file from the default branch to show
+# the repository link as verified. Replace the placeholder with the real
+# npub (derived from the publisher nsec held in the ORCHARD_NSEC secret);
+# update it whenever the signing key changes.
+npub1replacewiththepublishersecretkeynpub
