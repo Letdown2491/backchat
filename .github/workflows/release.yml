@@ -42,7 +42,10 @@ jobs:
       - name: Install flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree elfutils
+          # elfutils: flatpak-builder strips debuginfo by shelling out to
+          # eu-strip on the HOST (a flatpak-Builder build finds it in the
+          # SDK sandbox; a native runner does not)
           flatpak --user remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
 
