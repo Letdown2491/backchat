@@ -81,6 +81,11 @@ fn main() {
         cx.bind_keys(input::key_bindings());
 
         let bounds = Bounds::centered(None, size(px(720.), px(760.)), cx);
+        // the Wayland app_id: niri rules and the flatpak's icon
+        // association match against it, and inside the flatpak the
+        // FLATPAK_ID is what the desktop file expects
+        let app_id =
+            std::env::var("FLATPAK_ID").unwrap_or_else(|_| "backchat".to_string());
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -94,6 +99,7 @@ fn main() {
                     title: Some("backchat".into()),
                     ..Default::default()
                 }),
+                app_id: Some(app_id.clone().into()),
                 ..Default::default()
             },
             move |_, cx| {

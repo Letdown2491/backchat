@@ -79,27 +79,32 @@ pub struct OwnWindow {
     #[serde(default)]
     pub pid: Option<u32>,
     #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
     pub is_floating: Option<bool>,
 }
 
-/// The niri windows this process owns: niri tags every window with
-/// the pid that opened its Wayland connection, and an app's windows
-/// are exactly the ones carrying its own. Err when there is no niri
-/// to ask (any other desktop): callers treat that as unknown and
-/// leave their bars alone.
-pub fn own_windows() -> Result<Vec<OwnWindow>> {
+/// The niri windows this process owns. Err when there is no niri to
+/// ask (any other desktop): callers treat that as unknown and leave
+/// their bars alone.
+///
+/// A window is ours when either its pid is ours (the host run) or it
+/// wears our app_id (the container run, where niri sees the host pid
+/// and cannot match ours; the Wayland `app_id` crosses that
+/// boundary).
+pub fn own_app_windows(app_id: &str) -> Result<Vec<OwnWindow>> {
     let payload = request_with_timeout(&serde_json::json!("Windows"), Duration::from_secs(2))?;
-    own_from_payload(&payload)
-}
-
-fn own_from_payload(payload: &Value) -> Result<Vec<OwnWindow>> {
     let windows: Vec<OwnWindow> = serde_json::from_value(payload["Windows"].clone())
         .context("niri's Windows reply did not parse")?;
+    Ok(windows_for(windows, app_id))
+}
+
+fn windows_for(windows: Vec<OwnWindow>, app_id: &str) -> Vec<OwnWindow> {
     let pid = std::process::id();
-    Ok(windows
+    windows
         .into_iter()
-        .filter(|window| window.pid == Some(pid))
-        .collect())
+        .filter(|window| window.pid == Some(pid) || window.app_id.as_deref() == Some(app_id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -123,26 +128,29 @@ mod tests {
     }
 
     #[test]
-    fn own_windows_keeps_this_pids_windows_only() {
+    fn own_app_windows_keeps_its_own_windows_only() {
         let mine = std::process::id();
-        let payload = serde_json::json!({"Windows": [
-            {"id": 1, "pid": mine, "is_floating": false},
-            {"id": 2, "pid": 2298, "is_floating": true},
-            {"id": 3, "pid": mine, "is_floating": true},
-        ]});
-        let own = own_from_payload(&payload).unwrap();
-        assert_eq!(own.len(), 2, "only this process's windows");
-        assert!(own.iter().all(|w| w.pid == Some(mine)));
+        let payload = vec![
+            OwnWindow { pid: Some(mine), app_id: None, is_floating: Some(false) },
+            OwnWindow { pid: Some(2298), app_id: Some("other".into()), is_floating: Some(true) },
+            OwnWindow { pid: None, app_id: Some("backchat".into()), is_floating: Some(true) },
+            OwnWindow { pid: Some(2298), app_id: Some("backchat".into()), is_floating: Some(false) },
+        ];
+        let own = windows_for(payload, "backchat");
+        // pid match (the host run) or app_id match (the container run);
+        // the pid-2298 window wearing another app's id stays out
+        assert_eq!(own.len(), 3);
     }
 
     #[test]
-    fn own_windows_reads_a_reply_without_the_floating_field() {
+    fn own_app_windows_reads_a_reply_without_the_floating_field() {
         // an older niri: the field is absent, the parse holds, and the
         // unknown reads as not tiled
         let payload = serde_json::json!({"Windows": [
             {"id": 2, "pid": std::process::id()},
         ]});
-        let own = own_from_payload(&payload).unwrap();
+        let parsed: Vec<OwnWindow> = serde_json::from_value(payload["Windows"].clone()).unwrap();
+        let own = windows_for(parsed, "backchat");
         assert_eq!(own.len(), 1);
         assert_eq!(own[0].is_floating, None);
     }

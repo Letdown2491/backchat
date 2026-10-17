@@ -166,8 +166,12 @@ impl ChatView {
         // tick. No niri (any other desktop) never answers, and the bar
         // stays. The tick then re-asks on an idle beat: render cannot
         // tick (an idle window draws no frames), and tiling changes land
-        // without input.
-        let niri_tiled = niri::own_windows().is_ok();
+        // without input. The windows are matched by pid or app_id: the
+        // dev run lives in a container, whose pid namespace numbers
+        // processes differently from the host pids niri sees, and the
+        // app_id crosses that boundary.
+        let app_id = std::env::var("FLATPAK_ID").unwrap_or_else(|_| "backchat".to_string());
+        let niri_tiled = niri::own_app_windows(&app_id).is_ok();
         {
             let niri_view = cx.weak_entity();
             cx.spawn(async move |_, cx| {
@@ -177,7 +181,10 @@ impl ChatView {
                         .await;
                     // a failed ask (no niri, restart) keeps the last answer
                     let own = cx
-                        .background_spawn(async move { niri::own_windows() })
+                        .background_spawn({
+                            let app_id = app_id.clone();
+                            async move { niri::own_app_windows(&app_id) }
+                        })
                         .await;
                     if let Ok(own) = own {
                         let tiled = own.iter().any(|w| w.is_floating == Some(false));
