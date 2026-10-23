@@ -10,13 +10,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if podman image exists localhost/bitchat-dev-rust 2>/dev/null; then
-  exec ./scripts/build.sh vendor vendor
+  ./scripts/build.sh vendor vendor
+else
+  if command -v cargo >/dev/null; then
+    cargo vendor vendor
+  else
+    echo "no podman image and no system cargo: install rustup (1.85+) or build" >&2
+    echo "the container first (scripts/build.sh builds it on first use)" >&2
+    exit 1
+  fi
 fi
 
-if command -v cargo >/dev/null; then
-  exec cargo vendor vendor
-fi
-
-echo "no podman image and no system cargo: install rustup (1.85+) or build" >&2
-echo "the container first (scripts/build.sh builds it on first use)" >&2
-exit 1
+# Reapply the gpui list patches on the fresh vendor copy. cargo vendor
+# writes original checksums, so rehash whatever the patch touched.
+./scripts/apply-gpui-patches.sh
