@@ -55,6 +55,14 @@ struct Peer {
 /// Conversation lines kept per peer; older lines are trimmed.
 const MAX_DM_HISTORY: usize = 500;
 
+/// Cap on the channel presence table (every pubkey ever seen this
+/// session). Past the cap the stalest entries are evicted; `people`
+/// counts only the 300-second window anyway.
+const MAX_PEERS: usize = 4096;
+
+/// Cap on distinct DM conversations kept in memory.
+const MAX_DM_PEERS: usize = 128;
+
 /// One geohash's observed activity during a discovery scan. The
 /// sender map is per-sender last-event time so people counts can window
 /// to the phone's 5-minute presence semantics; the set is capped: past
@@ -127,6 +135,10 @@ pub struct ChatStore {
     /// Whether the window is the active one; the UI keeps this fresh in
     /// the pumps. Notifications only fire for arrivals while false.
     pub window_active: bool,
+    /// Bumped on every log mutation (mesh, channel, DM): the view caches
+    /// rendered lines keyed on it and skips the per-frame clone when
+    /// nothing changed.
+    pub log_epoch: u64,
     /// Notifications queued while the window was inactive; the pumps
     /// drain and send them through the portal.
     pub pending_notifications: Vec<crate::notify::Ping>,
@@ -178,7 +190,20 @@ impl ChatStore {
             geo_rx: Some(geo_rx),
             window_active: true,
             pending_notifications: Vec::new(),
+            log_epoch: 0,
         }
+    }
+
+    /// Append to the mesh log and version it.
+    fn push_mesh(&mut self, line: ChatLine) {
+        self.mesh.push(line);
+        self.log_epoch += 1;
+    }
+
+    /// Append to the channel log and version it.
+    fn push_channel(&mut self, line: ChatLine) {
+        self.channel.push(line);
+        self.log_epoch += 1;
     }
 
     /// Does the text mention our nickname (case-insensitive)? An empty
@@ -229,28 +254,27 @@ impl ChatStore {
     /// Identity-level notice: lands in both spaces' logs.
     pub fn system_line(&mut self, text: impl Into<String>) {
         let text: String = text.into();
-        self.mesh.push(ChatLine::System { text: text.clone() });
-        self.channel.push(ChatLine::System { text });
+        self.push_mesh(ChatLine::System { text: text.clone() });
+        self.push_channel(ChatLine::System { text });
         self.trim();
     }
 
     /// Notice only in the mesh log.
     pub fn log_mesh(&mut self, text: impl Into<String>) {
-        self.mesh.push(ChatLine::System { text: text.into() });
+        self.push_mesh(ChatLine::System { text: text.into() });
         self.trim();
     }
 
     /// Notice only in the channel (geohash) log.
     pub fn log_channel(&mut self, text: impl Into<String>) {
-        self.channel.push(ChatLine::System { text: text.into() });
+        self.push_channel(ChatLine::System { text: text.into() });
         self.trim();
     }
 
     /// Notice only in one DM's history: fingerprint and verification
     /// output lives with the conversation it verifies.
     pub fn log_dm(&mut self, peer: &[u8; 8], text: impl Into<String>) {
-        let pending = self.dms.entry(*peer).or_default();
-        pending.push(DmLine {
+        self.push_dm(*peer, DmLine {
             sender: String::new(),
             content: text.into(),
             ours: false,
@@ -263,6 +287,7 @@ impl ChatStore {
         for log in [&mut self.mesh, &mut self.channel] {
             if log.len() > 1000 {
                 log.drain(..log.len() - 1000);
+                self.log_epoch += 1;
             }
         }
     }
@@ -324,7 +349,7 @@ impl ChatStore {
             return;
         }
         self.send_mesh_public(content);
-        self.mesh.push(ChatLine::Message {
+        self.push_mesh(ChatLine::Message {
             sender: self.nickname_or_id(),
             content: content.to_string(),
             ours: true,
@@ -351,7 +376,7 @@ impl ChatStore {
             false,
         );
         let _ = self.relay_tx.send(RelayCommand::Publish(event));
-        self.channel.push(ChatLine::Message {
+        self.push_channel(ChatLine::Message {
             sender: self.nickname_or_id(),
             content: content.to_string(),
             ours: true,
@@ -404,7 +429,7 @@ impl ChatStore {
                 let sender = self.note_peer(&event.pubkey, tag_value(&event.tags, "n"), event.created_at);
                 let mention = self.mentions_me(&event.content) && !self.window_active;
                 let body = preview(&event.content);
-                self.channel.push(ChatLine::Message {
+                self.push_channel(ChatLine::Message {
                     sender: sender.clone(),
                     content: event.content.clone(),
                     ours: false,
@@ -461,7 +486,7 @@ impl ChatStore {
             MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
                 let mention = self.mentions_me(&content) && !self.window_active;
                 let body = preview(&content);
-                self.mesh.push(ChatLine::Message {
+                self.push_mesh(ChatLine::Message {
                     sender: nickname.clone(),
                     content,
                     ours: false,
@@ -478,8 +503,7 @@ impl ChatStore {
             }
             MeshEvent::DmPending { peer_id } => {
                 // Honest feedback: queued behind a handshake, not delivered.
-                let pending = self.dms.entry(peer_id).or_default();
-                pending.push(DmLine {
+                self.push_dm(peer_id, DmLine {
                     sender: String::new(),
                     content: "opening encrypted channel\u{2026} your message sends automatically".into(),
                     ours: true,
@@ -778,8 +802,22 @@ impl ChatStore {
     /// Append to a peer's conversation, oldest-capped. DM history is
     /// otherwise unbounded over the life of the app.
     fn push_dm(&mut self, peer: [u8; 8], line: DmLine) {
+        // Cap the number of conversations too: each is history-capped but
+        // the map itself would grow with every peer ever messaged.
+        if !self.dms.contains_key(&peer) && self.dms.len() >= MAX_DM_PEERS {
+            let oldest = self
+                .dms
+                .iter()
+                .min_by_key(|(_, h)| h.last().map(|l| l.timestamp).unwrap_or(i64::MIN))
+                .map(|(k, _)| *k);
+            if let Some(k) = oldest {
+                self.dms.remove(&k);
+                self.unread.remove(&k);
+            }
+        }
         let history = self.dms.entry(peer).or_default();
         history.push(line);
+        self.log_epoch += 1;
         if history.len() > MAX_DM_HISTORY {
             let excess = history.len() - MAX_DM_HISTORY;
             history.drain(..excess);
@@ -877,6 +915,26 @@ impl ChatStore {
 
     /// Record presence for a pubkey, returning the display name.
     fn note_peer(&mut self, pubkey: &str, nickname: Option<String>, at: i64) -> String {
+        // The table holds every pubkey ever seen in this channel's
+        // session; sweep stale entries and cap it so a days-long flood
+        // cannot grow it without bound.
+        if self.peers.len() >= MAX_PEERS {
+            let cutoff = at - 86_400;
+            self.peers.retain(|_, p| p.last_seen >= cutoff);
+            while self.peers.len() >= MAX_PEERS {
+                let oldest = self
+                    .peers
+                    .iter()
+                    .min_by_key(|(_, p)| p.last_seen)
+                    .map(|(k, _)| k.clone());
+                match oldest {
+                    Some(k) => {
+                        self.peers.remove(&k);
+                    }
+                    None => break,
+                }
+            }
+        }
         let peer = self.peers.entry(pubkey.to_string()).or_insert(Peer { nickname: None, last_seen: 0 });
         if let Some(n) = nickname.filter(|n| !n.is_empty()) {
             peer.nickname = Some(n);

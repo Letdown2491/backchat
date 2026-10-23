@@ -72,6 +72,14 @@ pub struct ChatView {
     /// Key of the first line last frame: a changed key with an unchanged
     /// count means the log was trimmed from the front (the 1000-line cap).
     last_first: Option<String>,
+    /// Snapshot of the active space's lines, valid while `lines_epoch` and
+    /// `lines_space` still match: renders with no new lines reuse this
+    /// instead of cloning up to a thousand rows per frame.
+    lines_cache: Rc<Vec<ChatLine>>,
+    lines_epoch: u64,
+    lines_space: Option<Space>,
+    /// DM snapshot cache, keyed by the open peer (same epoch gate).
+    dm_cache: Option<([u8; 8], Rc<Vec<ChatLine>>)>,
     /// Last frame's measured content height for the log list: growing
     /// heights mean rows are still being measured, not that the reader
     /// scrolled.
@@ -114,31 +122,41 @@ impl ChatView {
                         let Some(event) = event else {
                             return; // manager gone
                         };
-                        match event {
-                            RelayEvent::Received { event, .. } => {
-                                let _ = this.update_in(cx, |view, window, cx| {
-                                    view.store.update(cx, |store, _| {
-                                        store.window_active = window.is_window_active();
-                                        store.on_relay_event(event);
-                                        for ping in store.pending_notifications.drain(..) {
-                                            crate::notify::send(&view.tokio, ping);
-                                        }
-                                    });
-                                    cx.notify();
-                                });
-                            }
-                            RelayEvent::Status { delta } => {
-                                let _ = this.update(cx, |view, cx| {
-                                    view.store.update(cx, |store, _| store.on_status(delta));
-                                });
-                            }
+                        // Coalesce the burst: a flood delivers dozens of
+                        // events per second (each one echoed by every
+                        // relay), and one store update plus one render per
+                        // event would drown the UI. Drain whatever is
+                        // already queued and apply it in a single update.
+                        let mut batch = vec![event];
+                        while let Ok(more) = relay_rx.try_recv() {
+                            batch.push(more);
                         }
+                        let _ = this.update_in(cx, |view, window, cx| {
+                            view.store.update(cx, |store, _| {
+                                store.window_active = window.is_window_active();
+                                for event in batch {
+                                    match event {
+                                        RelayEvent::Received { event, .. } => {
+                                            store.on_relay_event(event);
+                                        }
+                                        RelayEvent::Status { delta } => {
+                                            store.on_status(delta);
+                                        }
+                                    }
+                                }
+                                for ping in store.pending_notifications.drain(..) {
+                                    crate::notify::send(&view.tokio, ping);
+                                }
+                            });
+                            cx.notify();
+                        });
                     }
                     fix = geo_rx.as_mut().expect("geo_rx present unless done").recv(), if !geo_done => {
                         match fix {
                             Some(fix) => {
                                 let _ = this.update(cx, |view, cx| {
-                                    view.store.update(cx, |store, _| store.set_geo_fix(fix))
+                                    view.store.update(cx, |store, _| store.set_geo_fix(fix));
+                                    cx.notify();
                                 });
                             }
                             None => {} // fetch failed; retry on next browse
@@ -146,7 +164,6 @@ impl ChatView {
                         geo_done = true; // one-shot either way
                     }
                 }
-                let _ = this.update(cx, |_, cx| cx.notify());
             }
         })
         .detach();
@@ -158,29 +175,32 @@ impl ChatView {
                     let Some(event) = mesh_rx.recv().await else {
                         return; // node gone
                     };
+                    // Coalesce bursts of mesh events into one store update
+                    // and one render (same rationale as the relay pump).
+                    let mut batch = vec![event];
+                    while let Ok(more) = mesh_rx.try_recv() {
+                        batch.push(more);
+                    }
                     // A DM for the conversation that's currently open is
                     // read on arrival; don't leave an unread badge up.
-                    let sender = if let MeshEvent::PrivateMessage { sender_id, .. } = &event {
-                        Some(*sender_id)
-                    } else {
-                        None
-                    };
+                    let senders: Vec<[u8; 8]> = batch.iter().filter_map(|e| match e {
+                        MeshEvent::PrivateMessage { sender_id, .. } => Some(*sender_id),
+                        _ => None,
+                    }).collect();
                     let _ = this.update_in(cx, |view, window, cx| {
-                        let sender_open = match (sender, &view.space) {
-                            (Some(sender), Space::Person(peer, _)) => sender == *peer,
-                            _ => false,
-                        };
                         view.store.update(cx, |store, _| {
                             store.window_active = window.is_window_active();
-                            store.on_mesh_event(event);
+                            for event in batch {
+                                store.on_mesh_event(event);
+                            }
                             for ping in store.pending_notifications.drain(..) {
                                 crate::notify::send(&view.tokio, ping);
                             }
                             // A DM for the conversation that's currently
                             // open is read on arrival; don't leave an
                             // unread badge up.
-                            if sender_open {
-                                if let Some(sender) = sender {
+                            for sender in senders {
+                                if matches!(&view.space, Space::Person(peer, _) if *peer == sender) {
                                     store.mark_dm_read(&sender);
                                 }
                             }
@@ -269,6 +289,10 @@ impl ChatView {
             space: Space::Mesh,
             last_count: 0,
             last_first: None,
+            lines_cache: Rc::new(Vec::new()),
+            lines_epoch: 0,
+            lines_space: None,
+            dm_cache: None,
             last_max_offset: px(0.),
             last_offset: px(0.),
             pin_bottom: false,
@@ -468,33 +492,69 @@ impl Render for ChatView {
         // The channel browser replaces the log when open.
         let browsing = self.browsing && matches!(space, Space::Channel);
 
-        // Logs for the active space (unused while browsing).
-        let lines: Vec<ChatLine> = if browsing {
-            Vec::new()
+        // Logs for the active space (unused while browsing). Cached per
+        // (space, log epoch): a frame with no new lines reuses the
+        // snapshot instead of cloning up to a thousand rows every frame.
+        let epoch = self.store.read(cx).log_epoch;
+        let lines: Rc<Vec<ChatLine>> = if browsing {
+            Rc::new(Vec::new())
         } else {
             match &space {
-                Space::Mesh => self.store.update(cx, |store, _| store.mesh.clone()),
-                Space::Channel => self.store.update(cx, |store, _| store.channel.clone()),
-                Space::Person(peer, _) => self.store.update(cx, |store, _| {
-                    store
-                        .dm_history(peer)
-                        .iter()
-                        .map(|dm| {
-                            if dm.notice {
-                                ChatLine::System { text: dm.content.clone() }
-                            } else {
-                                ChatLine::Message {
-                                    sender: dm.sender.clone(),
-                                    content: dm.content.clone(),
-                                    ours: dm.ours,
-                                    timestamp: dm.timestamp,
-                                }
+                Space::Mesh | Space::Channel => {
+                    if self.lines_epoch == epoch && self.lines_space.as_ref() == Some(&space) {
+                        self.lines_cache.clone()
+                    } else {
+                        let snapshot = match &space {
+                            Space::Mesh => self.store.update(cx, |store, _| store.mesh.clone()),
+                            Space::Channel => {
+                                self.store.update(cx, |store, _| store.channel.clone())
                             }
-                        })
-                        .collect()
-                }),
+                            _ => unreachable!(),
+                        };
+                        let snapshot = Rc::new(snapshot);
+                        self.lines_cache = snapshot.clone();
+                        self.lines_epoch = epoch;
+                        snapshot
+                    }
+                }
+                Space::Person(peer, _) => {
+                    if let Some((cached_peer, cached)) = &self.dm_cache
+                        && *cached_peer == *peer
+                        && self.lines_epoch == epoch
+                    {
+                        cached.clone()
+                    } else {
+                        let snapshot: Rc<Vec<ChatLine>> = Rc::new(self.store.update(cx, |store, _| {
+                            store
+                                .dm_history(peer)
+                                .iter()
+                                .map(|dm| {
+                                    if dm.notice {
+                                        ChatLine::System { text: dm.content.clone() }
+                                    } else {
+                                        ChatLine::Message {
+                                            sender: dm.sender.clone(),
+                                            content: dm.content.clone(),
+                                            ours: dm.ours,
+                                            timestamp: dm.timestamp,
+                                        }
+                                    }
+                                })
+                                .collect()
+                        }));
+                        self.dm_cache = Some((*peer, snapshot.clone()));
+                        self.lines_epoch = epoch;
+                        snapshot
+                    }
+                }
             }
         };
+        if !browsing {
+            self.lines_space = match &space {
+                Space::Mesh | Space::Channel => Some(space.clone()),
+                _ => None,
+            };
+        }
 
         if browsing {
             // Empty the list for real: leaving the browser splices the
@@ -849,7 +909,6 @@ impl Render for ChatView {
                                 .children(panel)
                                 .into_any_element(),
                             None => {
-                                let lines = Rc::new(lines);
                                 let hue = space.hue();
                                 // The list must size itself: it draws its
                                 // items in prepaint, so it contributes no
