@@ -27,6 +27,9 @@ fi
 if [[ -n "${BACKCHAT_NO_CENTRAL:-}" ]]; then
   EXTRA_ENV+=(-e "BACKCHAT_NO_CENTRAL=$BACKCHAT_NO_CENTRAL")
 fi
+if [[ -n "${BACKCHAT_LIST_DEBUG:-}" ]]; then
+  EXTRA_ENV+=(-e "BACKCHAT_LIST_DEBUG=$BACKCHAT_LIST_DEBUG")
+fi
 
 exec podman run --rm -i --userns=keep-id \
   -v "$PWD":/work -w /work \

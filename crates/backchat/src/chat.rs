@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use gpui::{
     div, list, prelude::*, px, rgb, AnyElement, App, ClickEvent, Context, Entity, Focusable,
-    FontWeight, ListAlignment, ListState, ParentElement, Pixels, Render, ScrollHandle,
-    SharedString, Styled, Window,
+    FontWeight, LineFragment, ListAlignment, ListState, ParentElement, Pixels, Render,
+    ScrollHandle, SharedString, Styled, TextStyle, Window,
 };
 
 use crate::niri;
@@ -69,10 +69,16 @@ pub struct ChatView {
     browse_scroll: ScrollHandle,
     space: Space,
     last_count: usize,
+    /// Key of the first line last frame: a changed key with an unchanged
+    /// count means the log was trimmed from the front (the 1000-line cap).
+    last_first: Option<String>,
     /// Last frame's measured content height for the log list: growing
     /// heights mean rows are still being measured, not that the reader
     /// scrolled.
     last_max_offset: Pixels,
+    /// Last frame's scroll offset: a frame-over-frame move upward means the
+    /// reader wheeled, even while new rows keep arriving.
+    last_offset: Pixels,
     /// Keep the log pinned to its last row (see the render tail-follow).
     pin_bottom: bool,
     last_space: Space,
@@ -242,6 +248,19 @@ impl ChatView {
         }
 
         let input = cx.new(|cx| TextInput::focused("", "", cx));
+        // List-debug: replace the log with rows of known lengths at the top
+        // of the view so measured heights can be correlated with content
+        // without waiting for real traffic.
+        if std::env::var("BACKCHAT_LIST_DEBUG").is_ok() {
+            store.update(cx, |store, _| {
+                store.mesh.clear();
+                store.channel.clear();
+                store.system_line("tiny");
+                store.system_line("word ".repeat(12).trim_end()); // 60 chars
+                store.system_line("word ".repeat(30).trim_end()); // 150
+                store.system_line("word ".repeat(60).trim_end()); // 300
+            });
+        }
         Self {
             store,
             input,
@@ -249,7 +268,9 @@ impl ChatView {
             browse_scroll: ScrollHandle::new(),
             space: Space::Mesh,
             last_count: 0,
+            last_first: None,
             last_max_offset: px(0.),
+            last_offset: px(0.),
             pin_bottom: false,
             last_space: Space::Mesh,
             browsing: false,
@@ -476,7 +497,14 @@ impl Render for ChatView {
         };
 
         if browsing {
-            self.last_count = 0;
+            // Empty the list for real: leaving the browser splices the
+            // fresh log in at 0, and any stale items would linger past the
+            // end as zero-height phantom rows.
+            if self.last_count != 0 {
+                self.log_list.splice(0..self.last_count, 0);
+                self.last_count = 0;
+            }
+            self.last_first = None;
             self.last_space = space.clone();
             self.last_browsing = true;
         } else {
@@ -492,17 +520,47 @@ impl Render for ChatView {
             // Scroll offsets run negative going down; max_offset is the
             // positive content-minus-viewport distance.
             let max_offset = self.log_list.max_offset_for_scrollbar().height;
-            let at_bottom = -self.log_list.scroll_px_offset_for_scrollbar().y >= max_offset - px(2.0);
+            let offset = -self.log_list.scroll_px_offset_for_scrollbar().y;
+            let at_bottom = offset >= max_offset - px(2.0);
             let switched = self.last_space != space || self.last_browsing != browsing;
             let grew = count != self.last_count;
             let heights_settled = max_offset != self.last_max_offset;
+            // An upward move since last frame is the reader wheeling: the
+            // wheel lands after this frame's follow, so we only see it
+            // here. This must win over grew/heights_settled, which are
+            // both permanently true in a busy channel and would otherwise
+            // keep yanking the reader back to the bottom.
+            let moved_up = offset < self.last_offset - px(1.0);
             if switched || (grew && at_bottom) {
                 self.pin_bottom = true;
-            } else if !grew && !heights_settled && !at_bottom {
+            } else if moved_up || (!grew && !heights_settled && !at_bottom) {
                 self.pin_bottom = false;
             }
-            // Refresh cached row heights for anything that changed.
-            self.log_list.splice(0..self.last_count, count);
+            self.last_offset = offset;
+            // Splice only when the content actually changed: an every-frame
+            // splice churns the item tree and (before the vendor fix) reset
+            // the scroll offset into the spliced range every frame, making
+            // the log unscrollable.
+            // A pure append inserts just the new tail, so measured heights
+            // and the scroll offset survive. A shift (the 1000-line cap
+            // draining from the front) changes the count by zero, so it is
+            // detected via the first line and respliced wholesale.
+            let first_key = lines.first().map(|l| match l {
+                ChatLine::System { text } => format!("s{text}"),
+                ChatLine::Message { sender, content, timestamp, .. } => {
+                    format!("m{sender}{}{content}", timestamp)
+                }
+            });
+            let shifted = count == self.last_count && first_key != self.last_first;
+            if count != self.last_count || shifted {
+                if count > self.last_count {
+                    self.log_list
+                        .splice(self.last_count..self.last_count, count - self.last_count);
+                } else {
+                    self.log_list.splice(0..self.last_count, count);
+                }
+            }
+            self.last_first = first_key;
             if count > 0 && self.pin_bottom {
                 self.log_list.scroll_to_reveal_item(count - 1);
             }
@@ -797,8 +855,11 @@ impl Render for ChatView {
                                 // items in prepaint, so it contributes no
                                 // layout height of its own. As a flex child
                                 // with flex_1 it fills the log area.
-                                list(self.log_list.clone(), move |ix, _window, _cx| {
-                                    chat_row(&lines, ix, hue)
+                                list(self.log_list.clone(), move |ix, window, _cx| {
+                                    if std::env::var("BACKCHAT_LIST_DEBUG").is_ok() {
+                                        eprintln!("[row] ix {} of {}", ix, lines.len());
+                                    }
+                                    chat_row(&lines, ix, hue, window)
                                         .unwrap_or_else(|| div().into_any_element())
                                 })
                                 .flex_1()
@@ -1349,7 +1410,12 @@ fn format_fingerprint(fp: &str) -> String {
 /// One virtualized log row (and its day separator when the day changed): a
 /// pure function of the line slice and the space hue, so gpui's list can
 /// build rows lazily instead of every frame.
-fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
+fn chat_row(
+    lines: &[ChatLine],
+    ix: usize,
+    hue: u32,
+    window: &mut Window,
+) -> Option<AnyElement> {
     let line = lines.get(ix)?;
     match line {
         ChatLine::System { text } => Some(
@@ -1359,7 +1425,12 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                 .justify_center()
                 .py_0p5()
                 .child(
+                    // min_w_0 lets this flex item shrink below its
+                    // unwrapped text width so long system lines (relay
+                    // lists) wrap instead of overflowing the pane.
                     div()
+                        .min_w_0()
+                        .max_w_full()
                         .text_size(px(11.))
                         .italic()
                         .text_color(rgb(DIM))
@@ -1386,6 +1457,8 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                             .py_2()
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .max_w_full()
                                     .text_size(px(10.))
                                     .text_color(rgb(DIM))
                                     .child(day_label(day)),
@@ -1393,7 +1466,28 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                     );
                 }
             }
-            let body = div().text_size(px(14.)).child(content.clone());
+            let mut body = div().text_size(px(14.)).child(content.clone());
+            // Give multi-line bodies a definite height. gpui's taffy sizes
+            // list rows from the text's max-content (unwrapped) height and
+            // never propagates the wrapped height measured at the final
+            // definite width, so rows painted wrapped text over one-line
+            // heights. Count the wrap points here and pin the body height;
+            // the definite child height propagates up correctly.
+            if !content.trim().is_empty() {
+                // 4px under the real 396px text width so rounding of shaped
+                // advances can only over-count lines, never under-count.
+                let wrap_width = px(392.);
+                let font = window.text_style().font();
+                let mut wrapper = window.text_system().line_wrapper(font, px(14.));
+                let fragment = [LineFragment::text(content)];
+                let lines_n = wrapper.wrap_line(&fragment, wrap_width).count() + 1;
+                if lines_n > 1 {
+                    let line_height = TextStyle::default()
+                        .line_height
+                        .to_pixels(px(14.).into(), window.rem_size());
+                    body = body.h((lines_n as f32) * line_height);
+                }
+            }
             if *ours {
                 row = row.child(
                     div()
@@ -1405,6 +1499,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                         .child(
                             div()
                                 .max_w(px(420.))
+                                .min_w_0()
                                 .px_3()
                                 .py_1p5()
                                 .rounded(px(12.))
@@ -1438,6 +1533,7 @@ fn chat_row(lines: &[ChatLine], ix: usize, hue: u32) -> Option<AnyElement> {
                                 .flex_col()
                                 .gap_0p5()
                                 .max_w(px(420.))
+                                .min_w_0()
                                 .px_3()
                                 .py_1p5()
                                 .rounded(px(12.))
