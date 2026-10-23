@@ -26,11 +26,15 @@ homepage = "https://github.com/Letdown2491/backchat"
 
 [release]
 # Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
-version = "0.1.0"
+version = "0.1.1"
 channel = "stable"
 arch = "linux-x86_64"
-platforms = ["linux-x86_64"]
-# Keep in step with runtime-version in the flatpak manifest.
+# The listing declares coverage for both arches and is identical from
+# either publish leg (the relays dedupe it); each CI leg passes --arch
+# for its own build, which also rewrites the runtime's arch.
+platforms = ["linux-x86_64", "linux-aarch64"]
+# Keep in step with runtime-version in the flatpak manifest; the CI legs
+# rewrite the arch per build.
 runtime = "org.freedesktop.Platform/x86_64/25.08"
 notes = "Release notes: https://github.com/Letdown2491/backchat/releases"
 

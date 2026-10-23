@@ -1,6 +1,11 @@
-# Release: tag v* builds the flatpak, attaches it to the GitHub release,
-# then publishes to Orchard (the Nostr flatpak store, github.com/Letdown2491/
-# orchard) with orchard-publish.
+# Release: tag v* builds the flatpak (one leg per architecture), attaches
+# the bundles to the GitHub release, then publishes to Orchard (the Nostr
+# flatpak store, github.com/Letdown2491/orchard) with orchard-publish.
+#
+# One listing, both architectures, mirroring orchard's own self-publish:
+# each runner builds its own arch and signs its own asset (per-arch `d`
+# tag and registry tag), while the listing declaring coverage for both is
+# identical from either leg, so the relays dedupe it.
 #
 # Secrets:
 #   ORCHARD_NSEC            the publisher's Nostr key (never in the repo)
@@ -31,7 +36,15 @@ env:
 
 jobs:
   flatpak:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux-x86_64
+            runner: ubuntu-24.04
+          - arch: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,7 +86,7 @@ jobs:
         run: |
           mkdir -p bundles
           flatpak build-bundle repo \
-            "bundles/backchat-${{ steps.ver.outputs.version }}-linux-x86_64.flatpak" \
+            "bundles/backchat-${{ steps.ver.outputs.version }}-${{ matrix.arch }}.flatpak" \
             "$APP_ID" stable
 
       - name: Attach to the release
@@ -95,13 +108,23 @@ jobs:
         run: tar -C self/tree --exclude=var/run -czf app-tree.tar.gz export files metadata var
       - uses: actions/upload-artifact@v4
         with:
-          name: app-tree
+          name: app-tree-${{ matrix.arch }}
           path: app-tree.tar.gz
           retention-days: 1
 
   orchard:
     needs: flatpak
-    runs-on: ubuntu-24.04
+    strategy:
+      # one publish leg per arch, mirroring the build matrix. needs holds
+      # each leg for the whole build matrix: a failed arch publishes
+      # nothing, which is the right shape for a release
+      matrix:
+        include:
+          - arch: linux-x86_64
+            runner: ubuntu-24.04
+          - arch: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -112,7 +135,7 @@ jobs:
       - name: Download the staged tree
         uses: actions/download-artifact@v4
         with:
-          name: app-tree
+          name: app-tree-${{ matrix.arch }}
 
       - name: Build orchard-publish from Orchard's pinned tag
         run: |
@@ -142,8 +165,11 @@ jobs:
           ORCHARD_REGISTRY_USER: ${{ github.actor }}
           ORCHARD_REGISTRY_PASSWORD: ${{ github.token }}
         run: |
+          # --arch overrides the manifest's build arch for this leg; the
+          # asset's `d` tag and the registry tag carry it, and the
+          # runtime string is rewritten to match
           cd self/packaging
           orchard-publish "io.github.Letdown2491.backchat.publish.toml" \
-            --arch linux-x86_64 \
-            --registry "$REGISTRY" --tag "latest-linux-x86_64" \
+            --arch "${{ matrix.arch }}" \
+            --registry "$REGISTRY" --tag "latest-${{ matrix.arch }}" \
             --out /tmp/orchard-out

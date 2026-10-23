@@ -38,6 +38,13 @@
   </content_rating>
 
   <releases>
+    <release version="0.1.1" date="2026-10-17">
+      <description>
+        <p>First aarch64 release: Linux phones and ARM laptops install the
+        same listing as x86_64. Mesh vocabulary unified across the client,
+        radio logging calmed.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-16">
       <description>
         <p>First packaging: BLE mesh dual-role radio, geohash channels,
