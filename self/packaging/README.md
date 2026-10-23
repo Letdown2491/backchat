@@ -80,7 +80,7 @@ flatpak run --command=flatpak-builder org.flatpak.Builder \
 
 # single-file bundle alternative:
 flatpak build-bundle self/tree/export \
-  backchat-0.1.0.flatpak io.github.Letdown2491.backchat stable
+  backchat-0.2.0.flatpak io.github.Letdown2491.backchat stable
 ```
 
 The `*.key` files for repo signing never enter this repository (gitignored).

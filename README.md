@@ -56,13 +56,16 @@ podman build -t localhost/bitchat-dev-rust -f containers/bitchat-dev-rust.contai
 
 A window opens: `◇ nearby` is everyone in bluetooth range; `# <geohash>`
 carries location-scoped channels over relays (joining picks the 5 relays
-nearest that cell from upstream's GPS relay directory); clicking a person
-opens an end-to-end-encrypted DM. `/nick <name>` sets your display name;
-`/help` lists commands. State lives in
-`~/.local/state/backchat/`: the device seed rotates every geohash
-identity, same unlinkability model as upstream.
+nearest that cell from upstream's GPS relay directory, or browse cells
+with `/join`); clicking a person opens an end-to-end-encrypted DM.
+`/nick <name>` sets your display name; `/dm <nick>`, `/fingerprint` and
+`/verify` handle private chats and fingerprint verification; `/help`
+lists commands. Mentions and DMs raise desktop notifications while the
+window is unfocused. State lives in `~/.local/state/backchat/`,
+owner-only (0600): the device seed rotates every geohash identity,
+same unlinkability model as upstream.
 
-Tests: `./scripts/build.sh test` (42 tests, all offline; one network probe
+Tests: `./scripts/build.sh test` (97 tests, all offline; one network probe
 behind `--ignored`).
 
 ## License
