@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use gpui::{
     div, list, prelude::*, px, rgb, AnyElement, App, ClickEvent, Context, Entity, Focusable,
-    FontWeight, ListAlignment, ListState, ParentElement, Render, ScrollHandle, SharedString,
-    Styled, Window,
+    FontWeight, ListAlignment, ListState, ParentElement, Pixels, Render, ScrollHandle,
+    SharedString, Styled, Window,
 };
 
 use crate::niri;
@@ -69,6 +69,12 @@ pub struct ChatView {
     browse_scroll: ScrollHandle,
     space: Space,
     last_count: usize,
+    /// Last frame's measured content height for the log list: growing
+    /// heights mean rows are still being measured, not that the reader
+    /// scrolled.
+    last_max_offset: Pixels,
+    /// Keep the log pinned to its last row (see the render tail-follow).
+    pin_bottom: bool,
     last_space: Space,
     /// Channel browser open (the `#` space's discovery view).
     browsing: bool,
@@ -243,6 +249,8 @@ impl ChatView {
             browse_scroll: ScrollHandle::new(),
             space: Space::Mesh,
             last_count: 0,
+            last_max_offset: px(0.),
+            pin_bottom: false,
             last_space: Space::Mesh,
             browsing: false,
             last_browsing: false,
@@ -472,22 +480,34 @@ impl Render for ChatView {
             self.last_space = space.clone();
             self.last_browsing = true;
         } else {
-            // Follow the tail only when the reader is at the bottom, or just
-            // switched spaces / left the browser; never yank someone reading
-            // history. Offsets are from the last paint, before the splice.
+            // Pin-to-bottom follow: while new rows arrive (or measured row
+            // heights are still settling), keep the last row revealed every
+            // frame. gpui's list counts never-rendered rows as zero height
+            // and clamps wheel scrolling to the measured total, so a burst
+            // of messages otherwise strands the reader above the bottom.
+            // Stop following on the first quiet frame away from the bottom:
+            // nothing new, no height corrections, not at the end. That is a
+            // reader scrolling up, and we must not yank them back.
             let count = lines.len();
             // Scroll offsets run negative going down; max_offset is the
             // positive content-minus-viewport distance.
-            let at_bottom = -self.log_list.scroll_px_offset_for_scrollbar().y
-                >= self.log_list.max_offset_for_scrollbar().height - px(2.0);
+            let max_offset = self.log_list.max_offset_for_scrollbar().height;
+            let at_bottom = -self.log_list.scroll_px_offset_for_scrollbar().y >= max_offset - px(2.0);
             let switched = self.last_space != space || self.last_browsing != browsing;
             let grew = count != self.last_count;
+            let heights_settled = max_offset != self.last_max_offset;
+            if switched || (grew && at_bottom) {
+                self.pin_bottom = true;
+            } else if !grew && !heights_settled && !at_bottom {
+                self.pin_bottom = false;
+            }
             // Refresh cached row heights for anything that changed.
             self.log_list.splice(0..self.last_count, count);
-            if count > 0 && (switched || (grew && at_bottom)) {
+            if count > 0 && self.pin_bottom {
                 self.log_list.scroll_to_reveal_item(count - 1);
             }
             self.last_count = count;
+            self.last_max_offset = max_offset;
             self.last_space = space.clone();
             self.last_browsing = false;
         }

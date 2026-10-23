@@ -143,6 +143,10 @@ async fn run_manager(
     // out to all of them.
     let mut sessions: Vec<(mpsc::UnboundedSender<RelayCommand>, tokio::task::JoinHandle<()>)> =
         Vec::new();
+    // The last relay set handed to SetRelays, to skip no-op rebuilds
+    // (seeded with the startup set so the first identical request is a
+    // no-op too).
+    let mut last_urls: Vec<String> = relays.clone();
     for relay in relays {
         spawn_session(&mut sessions, relay, evt_tx.clone());
     }
@@ -163,12 +167,26 @@ async fn run_manager(
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             RelayCommand::SetRelays(urls) => {
+                // Skip the rebuild when nothing changed: every rebuild drops
+                // live sessions and replays the since-window on every relay.
+                if urls == last_urls {
+                    continue;
+                }
+                last_urls = urls.clone();
                 for (tx, handle) in sessions.drain(..) {
                     let _ = tx.send(RelayCommand::Shutdown);
                     handle.abort();
                 }
                 for url in urls {
                     spawn_session(&mut sessions, url, evt_tx.clone());
+                }
+                // Fresh sessions start with an empty subscription set; hand
+                // them the current union so channel traffic and the
+                // discovery scan survive a rebuild (e.g. when the geo fix
+                // re-picks relays mid-session).
+                let subs = merged(&channel_subs, discovery);
+                for (tx, _) in &sessions {
+                    let _ = tx.send(RelayCommand::Subscribe(subs.clone()));
                 }
             }
             RelayCommand::Subscribe(subs) => {
