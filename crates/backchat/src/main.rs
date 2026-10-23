@@ -7,6 +7,7 @@ mod assets;
 mod chat;
 mod input;
 mod niri;
+mod notify;
 mod persistence;
 mod store;
 mod titlebar;
@@ -38,6 +39,9 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
+    // Handle for the notification portal (and anything else the UI wants
+    // to run on the radio runtime).
+    let tokio_handle = runtime.handle().clone();
     let relays: Vec<String> = if settings.relays.is_empty() {
         backchat_nostr::FALLBACK_RELAYS.iter().map(|s| s.to_string()).collect()
     } else {
@@ -102,7 +106,7 @@ fn main() {
                 app_id: Some(app_id.clone().into()),
                 ..Default::default()
             },
-            move |_, cx| {
+            move |window, cx| {
                 cx.new(|cx| {
                     let store = cx.new(|_cx| {
                         let mut store = ChatStore::new(
@@ -125,7 +129,7 @@ fn main() {
                     if !geohash.is_empty() {
                         store.update(cx, |store, _| store.join(&geohash));
                     }
-                    chat::ChatView::new(store, relay_rx, mesh_events, cx)
+                    chat::ChatView::new(store, relay_rx, mesh_events, tokio_handle, window, cx)
                 })
             },
         )

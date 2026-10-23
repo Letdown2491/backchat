@@ -75,6 +75,8 @@ pub struct ChatView {
     /// titlebar folds away while this or the compositor's own states
     /// read tiled.
     niri_tiled: bool,
+    /// Handle to the radio runtime; notification portal calls spawn here.
+    tokio: tokio::runtime::Handle,
 }
 
 impl ChatView {
@@ -84,27 +86,45 @@ impl ChatView {
         store: Entity<ChatStore>,
         mut relay_rx: tokio::sync::mpsc::UnboundedReceiver<RelayEvent>,
         mesh_rx: Option<tokio::sync::mpsc::Receiver<MeshEvent>>,
+        tokio: tokio::runtime::Handle,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pump_store = store.downgrade();
         let mut geo_rx = store.update(cx, |s, _| s.take_geo_rx());
         let mut geo_done = geo_rx.is_none();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 tokio::select! {
                     event = relay_rx.recv() => {
                         let Some(event) = event else {
                             return; // manager gone
                         };
-                        let _ = pump_store.update(cx, |store, _| match event {
-                            RelayEvent::Received { event, .. } => store.on_relay_event(event),
-                            RelayEvent::Status { delta } => store.on_status(delta),
-                        });
+                        match event {
+                            RelayEvent::Received { event, .. } => {
+                                let _ = this.update_in(cx, |view, window, cx| {
+                                    view.store.update(cx, |store, _| {
+                                        store.window_active = window.is_window_active();
+                                        store.on_relay_event(event);
+                                        for ping in store.pending_notifications.drain(..) {
+                                            crate::notify::send(&view.tokio, ping);
+                                        }
+                                    });
+                                    cx.notify();
+                                });
+                            }
+                            RelayEvent::Status { delta } => {
+                                let _ = this.update(cx, |view, cx| {
+                                    view.store.update(cx, |store, _| store.on_status(delta));
+                                });
+                            }
+                        }
                     }
                     fix = geo_rx.as_mut().expect("geo_rx present unless done").recv(), if !geo_done => {
                         match fix {
                             Some(fix) => {
-                                let _ = pump_store.update(cx, |store, _| store.set_geo_fix(fix));
+                                let _ = this.update(cx, |view, cx| {
+                                    view.store.update(cx, |store, _| store.set_geo_fix(fix))
+                                });
                             }
                             None => {} // fetch failed; retry on next browse
                         }
@@ -118,8 +138,7 @@ impl ChatView {
 
         // BLE mesh pump.
         if let Some(mut mesh_rx) = mesh_rx {
-            let mesh_store = store.downgrade();
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 loop {
                     let Some(event) = mesh_rx.recv().await else {
                         return; // node gone
@@ -131,13 +150,26 @@ impl ChatView {
                     } else {
                         None
                     };
-                    let _ = mesh_store.update(cx, |store, _| store.on_mesh_event(event));
-                    let _ = this.update(cx, |view, cx| {
-                        if let (Some(sender), Space::Person(peer, _)) = (sender, &view.space) {
-                            if sender == *peer {
-                                view.store.update(cx, |store, _| store.mark_dm_read(peer));
+                    let _ = this.update_in(cx, |view, window, cx| {
+                        let sender_open = match (sender, &view.space) {
+                            (Some(sender), Space::Person(peer, _)) => sender == *peer,
+                            _ => false,
+                        };
+                        view.store.update(cx, |store, _| {
+                            store.window_active = window.is_window_active();
+                            store.on_mesh_event(event);
+                            for ping in store.pending_notifications.drain(..) {
+                                crate::notify::send(&view.tokio, ping);
                             }
-                        }
+                            // A DM for the conversation that's currently
+                            // open is read on arrival; don't leave an
+                            // unread badge up.
+                            if sender_open {
+                                if let Some(sender) = sender {
+                                    store.mark_dm_read(&sender);
+                                }
+                            }
+                        });
                         cx.notify();
                     });
                 }
@@ -212,6 +244,7 @@ impl ChatView {
             browsing: false,
             last_browsing: false,
             niri_tiled,
+            tokio,
         }
     }
 

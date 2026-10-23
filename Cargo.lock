@@ -508,6 +508,7 @@ name = "backchat"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "ashpd 0.12.3",
  "backchat-ble",
  "backchat-core",
  "backchat-nostr",

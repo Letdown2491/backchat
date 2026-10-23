@@ -113,6 +113,22 @@ pub struct ChatStore {
     geo_loading: bool,
     geo_tx: UnboundedSender<Option<GeoFix>>,
     geo_rx: Option<UnboundedReceiver<Option<GeoFix>>>,
+    /// Whether the window is the active one; the UI keeps this fresh in
+    /// the pumps. Notifications only fire for arrivals while false.
+    pub window_active: bool,
+    /// Notifications queued while the window was inactive; the pumps
+    /// drain and send them through the portal.
+    pub pending_notifications: Vec<crate::notify::Ping>,
+}
+
+/// One-line preview for a notification body: first line, capped.
+fn preview(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    let mut out: String = line.chars().take(100).collect();
+    if line.chars().count() > 100 {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 impl ChatStore {
@@ -148,7 +164,22 @@ impl ChatStore {
             geo_loading: false,
             geo_tx,
             geo_rx: Some(geo_rx),
+            window_active: true,
+            pending_notifications: Vec::new(),
         }
+    }
+
+    /// Does the text mention our nickname (case-insensitive)? An empty
+    /// nickname never matches.
+    fn mentions_me(&self, text: &str) -> bool {
+        let nick = self.settings.nickname.trim();
+        !nick.is_empty() && text.to_lowercase().contains(&nick.to_lowercase())
+    }
+
+    /// Queue a notification for portal delivery (the pumps drain this).
+    /// Only callers that checked `window_active` reach here.
+    fn ping(&mut self, id: String, title: String, body: String) {
+        self.pending_notifications.push(crate::notify::Ping { id, title, body });
     }
 
     /// Identity-level notice: lands in both spaces' logs.
@@ -321,12 +352,21 @@ impl ChatStore {
                     return;
                 }
                 let sender = self.note_peer(&event.pubkey, tag_value(&event.tags, "n"), event.created_at);
+                let mention = self.mentions_me(&event.content) && !self.window_active;
+                let body = preview(&event.content);
                 self.channel.push(ChatLine::Message {
-                    sender,
+                    sender: sender.clone(),
                     content: event.content.clone(),
                     ours: false,
                     timestamp: event.created_at,
                 });
+                if mention {
+                    self.ping(
+                        "mention".into(),
+                        format!("#{channel} \u{b7} backchat"),
+                        format!("{sender}: {body}"),
+                    );
+                }
                 if self.scanning {
                     self.note_scan(&channel, &event.pubkey, event.created_at);
                 }
@@ -366,12 +406,21 @@ impl ChatStore {
                 }
             }
             MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
+                let mention = self.mentions_me(&content) && !self.window_active;
+                let body = preview(&content);
                 self.mesh.push(ChatLine::Message {
-                    sender: nickname,
+                    sender: nickname.clone(),
                     content,
                     ours: false,
                     timestamp: (timestamp / 1000) as i64,
                 });
+                if mention {
+                    self.ping(
+                        "mention".into(),
+                        "mesh \u{b7} backchat".into(),
+                        format!("{nickname}: {body}"),
+                    );
+                }
                 self.trim();
             }
             MeshEvent::DmPending { peer_id } => {
@@ -394,6 +443,14 @@ impl ChatStore {
                 });
             }
             MeshEvent::PrivateMessage { sender_id, nickname, content, .. } => {
+                if !self.window_active {
+                    let body = preview(&content);
+                    self.ping(
+                        format!("dm-{}", hex::encode(sender_id)),
+                        format!("{nickname} \u{b7} backchat"),
+                        body,
+                    );
+                }
                 self.push_dm(sender_id, DmLine {
                     sender: nickname.clone(),
                     content,
@@ -924,6 +981,64 @@ mod tests {
             l,
             ChatLine::System { text } if text.contains("phone sent you a private message")
         )));
+    }
+
+    #[test]
+    fn unfocused_arrivals_queue_notifications() {
+        let mut store = store_with_channel();
+        store.window_active = false;
+
+        // A DM queues a stable per-peer ping with a one-line preview.
+        store.on_mesh_event(MeshEvent::PrivateMessage {
+            sender_id: [9u8; 8],
+            nickname: "phone".into(),
+            content: "first line\nsecond line".into(),
+            message_id: "m1".into(),
+        });
+        assert_eq!(store.pending_notifications.len(), 1);
+        let ping = &store.pending_notifications[0];
+        assert_eq!(ping.id, "dm-0909090909090909");
+        assert_eq!(ping.title, "phone \u{b7} backchat");
+        assert_eq!(ping.body, "first line");
+
+        // A focused window queues nothing.
+        store.window_active = true;
+        store.pending_notifications.clear();
+        store.on_mesh_event(MeshEvent::PrivateMessage {
+            sender_id: [9u8; 8],
+            nickname: "phone".into(),
+            content: "again".into(),
+            message_id: "m2".into(),
+        });
+        assert!(store.pending_notifications.is_empty());
+
+        // A channel mention while unfocused queues one mention ping;
+        // silence without the mention.
+        store.window_active = false;
+        store.settings.nickname = "martin".into();
+        let event = geohash::create_ephemeral_geohash_event(
+            "hey MARTIN, look at this\nand more",
+            "dr5rs",
+            &Identity::generate(),
+            Some("peer_nick"),
+            false,
+        );
+        store.on_relay_event(event);
+        assert_eq!(store.pending_notifications.len(), 1);
+        let ping = &store.pending_notifications[0];
+        assert_eq!(ping.id, "mention");
+        assert_eq!(ping.title, "#dr5rs \u{b7} backchat");
+        assert_eq!(ping.body, "peer_nick: hey MARTIN, look at this");
+        store.pending_notifications.clear();
+        let event = geohash::create_ephemeral_geohash_event(
+            "no one special here",
+            "dr5rs",
+            &Identity::generate(),
+            Some("peer_nick"),
+            false,
+        );
+        store.on_relay_event(event);
+        assert!(store.pending_notifications.is_empty());
     }
 
     #[test]

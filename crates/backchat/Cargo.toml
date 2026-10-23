@@ -22,6 +22,10 @@ serde_json.workspace = true
 hex.workspace = true
 rand = "0.9"
 anyhow = "1"
+# Notification portal, async-io backend: the exact feature set gpui's
+# oo7 already compiles (the vendored copy's tokio path does not build).
+# Already in the vendor tree, so this adds no new crates.
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
