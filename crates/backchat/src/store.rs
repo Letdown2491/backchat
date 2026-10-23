@@ -82,8 +82,8 @@ pub struct ChatStore {
     /// Identity for the current geohash (derived from the device seed).
     pub persona: Option<Identity>,
     pub geohash: Option<String>,
-    /// Nearby (BLE mesh) space log: everyone in radio range.
-    pub nearby: Vec<ChatLine>,
+    /// Mesh (BLE) space log: everyone in radio range.
+    pub mesh: Vec<ChatLine>,
     /// Channel (geohash over relays) space log.
     pub channel: Vec<ChatLine>,
     pub connected_relays: usize,
@@ -130,7 +130,7 @@ impl ChatStore {
             directory,
             persona: None,
             geohash: None,
-            nearby: Vec::new(),
+            mesh: Vec::new(),
             channel: Vec::new(),
             connected_relays: 0,
             peers: HashMap::new(),
@@ -154,14 +154,14 @@ impl ChatStore {
     /// Identity-level notice: lands in both spaces' logs.
     pub fn system_line(&mut self, text: impl Into<String>) {
         let text: String = text.into();
-        self.nearby.push(ChatLine::System { text: text.clone() });
+        self.mesh.push(ChatLine::System { text: text.clone() });
         self.channel.push(ChatLine::System { text });
         self.trim();
     }
 
-    /// Notice only in the nearby (mesh) log.
-    pub fn log_nearby(&mut self, text: impl Into<String>) {
-        self.nearby.push(ChatLine::System { text: text.into() });
+    /// Notice only in the mesh log.
+    pub fn log_mesh(&mut self, text: impl Into<String>) {
+        self.mesh.push(ChatLine::System { text: text.into() });
         self.trim();
     }
 
@@ -172,7 +172,7 @@ impl ChatStore {
     }
 
     fn trim(&mut self) {
-        for log in [&mut self.nearby, &mut self.channel] {
+        for log in [&mut self.mesh, &mut self.channel] {
             if log.len() > 1000 {
                 log.drain(..log.len() - 1000);
             }
@@ -233,17 +233,17 @@ impl ChatStore {
         let _ = crate::persistence::save_settings(&self.settings);
     }
 
-    /// Broadcast to everyone in radio range (nearby space).
-    pub fn send_nearby(&mut self, content: &str) {
+    /// Broadcast to everyone in radio range (the mesh space).
+    pub fn send_mesh(&mut self, content: &str) {
         if content.trim().is_empty() {
             return;
         }
         if self.mesh_tx.is_none() {
-            self.log_nearby("mesh is not running (bluetooth unavailable?)");
+            self.log_mesh("mesh is not running (bluetooth unavailable?)");
             return;
         }
         self.send_mesh_public(content);
-        self.nearby.push(ChatLine::Message {
+        self.mesh.push(ChatLine::Message {
             sender: self.nickname_or_id(),
             content: content.to_string(),
             ours: true,
@@ -356,17 +356,17 @@ impl ChatStore {
         match event {
             MeshEvent::PeerSeen { peer_id, nickname, is_new } => {
                 if is_new {
-                    self.log_nearby(format!("{nickname} is here"));
+                    self.log_mesh(format!("{nickname} is here"));
                 }
                 self.mesh_peers.insert(peer_id, (nickname, now_secs()));
             }
             MeshEvent::PeerExpired { peer_id } => {
                 if let Some((nick, _)) = self.mesh_peers.remove(&peer_id) {
-                    self.log_nearby(format!("{nick} left"));
+                    self.log_mesh(format!("{nick} left"));
                 }
             }
             MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
-                self.nearby.push(ChatLine::Message {
+                self.mesh.push(ChatLine::Message {
                     sender: nickname,
                     content,
                     ours: false,
@@ -403,9 +403,9 @@ impl ChatStore {
                 });
                 *self.unread.entry(sender_id).or_default() += 1;
                 // Presence of the message lives in the people rail (unread
-                // badge); the nearby log gets a pointer so it's never
+                // badge); the mesh log gets a pointer so it's never
                 // invisible.
-                self.log_nearby(format!("{nickname} sent you a private message"));
+                self.log_mesh(format!("{nickname} sent you a private message"));
                 self.trim();
             }
         }
@@ -502,7 +502,7 @@ impl ChatStore {
             return;
         }
         let Some(mesh_tx) = &self.mesh_tx else {
-            self.log_nearby("mesh is not running (bluetooth unavailable?)");
+            self.log_mesh("mesh is not running (bluetooth unavailable?)");
             return;
         };
         let in_range = self
@@ -765,13 +765,13 @@ mod tests {
     }
 
     #[test]
-    fn nearby_sends_need_only_the_mesh() {
+    fn mesh_sends_need_only_the_radio() {
         let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
         let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
             tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
-        store.send_nearby("over the mesh");
-        // Echoed locally in the nearby space and dispatched to the mesh node.
-        match store.nearby.last() {
+        store.send_mesh("over the mesh");
+        // Echoed locally in the mesh space and dispatched to the mesh node.
+        match store.mesh.last() {
             Some(ChatLine::Message { content, ours, .. }) => {
                 assert_eq!(content, "over the mesh");
                 assert!(ours);
@@ -785,8 +785,8 @@ mod tests {
         // With no mesh, the user gets guidance instead of silence.
         let mut offline = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
             tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, None);
-        offline.send_nearby("hello");
-        assert!(matches!(offline.nearby.last(), Some(ChatLine::System { .. })));
+        offline.send_mesh("hello");
+        assert!(matches!(offline.mesh.last(), Some(ChatLine::System { .. })));
     }
 
     #[test]
@@ -913,14 +913,14 @@ mod tests {
         store.mark_dm_read(&peer);
         assert_eq!(store.total_unread(), 0);
 
-        // The DM went out over the mesh; the nearby log carries a pointer.
+        // The DM went out over the mesh; the mesh log carries a pointer.
         match mesh_rx.try_recv().expect("mesh command") {
             MeshCommand::SendPrivate { peer: p, content } => {
                 assert_eq!((p, content.as_str()), (peer, "hello private"));
             }
             other => panic!("expected SendPrivate, got {other:?}"),
         }
-        assert!(store.nearby.iter().any(|l| matches!(
+        assert!(store.mesh.iter().any(|l| matches!(
             l,
             ChatLine::System { text } if text.contains("phone sent you a private message")
         )));
@@ -1090,11 +1090,11 @@ mod tests {
     }
 
     #[test]
-    fn radio_lifecycle_surfaces_in_the_nearby_log() {
+    fn radio_lifecycle_surfaces_in_the_mesh_log() {
         let mut store = store_with_channel();
         store.on_mesh_event(MeshEvent::RadioRestarted { heal: true });
         assert!(!store.mesh_is_restarting());
-        assert!(store.nearby.iter().any(|l| matches!(
+        assert!(store.mesh.iter().any(|l| matches!(
             l,
             ChatLine::System { text } if text.contains("power-cycled")
         )));

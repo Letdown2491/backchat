@@ -27,7 +27,7 @@ const SURFACE: u32 = 0x12161c; // rail, composer field
 const RAISED: u32 = 0x1a2330; // my-message bubble, hover
 const TEXT: u32 = 0xe2e8f0;
 const DIM: u32 = 0x77828f;
-const MESH: u32 = 0x63d69c; // nearby / BLE
+const MESH: u32 = 0x63d69c; // mesh space / BLE
 const RELAY: u32 = 0x6ea8fe; // channel / relays
 const PRIVATE: u32 = 0xb8a1f5; // DMs
 
@@ -38,7 +38,7 @@ const COMMANDS: [&str; 7] = ["/join", "/nick", "/msg", "/dm", "/back", "/peers",
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Space {
     /// BLE mesh: everyone in radio range (mint).
-    Nearby,
+    Mesh,
     /// Geohash channel over relays (sky).
     Channel,
     /// Private conversation (violet).
@@ -48,7 +48,7 @@ enum Space {
 impl Space {
     fn hue(&self) -> u32 {
         match self {
-            Space::Nearby => MESH,
+            Space::Mesh => MESH,
             Space::Channel => RELAY,
             Space::Person(..) => PRIVATE,
         }
@@ -206,9 +206,9 @@ impl ChatView {
             input,
             log_list: ListState::new(0, ListAlignment::Top, px(256.)),
             browse_scroll: ScrollHandle::new(),
-            space: Space::Nearby,
+            space: Space::Mesh,
             last_count: 0,
-            last_space: Space::Nearby,
+            last_space: Space::Mesh,
             browsing: false,
             last_browsing: false,
             niri_tiled,
@@ -239,17 +239,17 @@ impl ChatView {
                         let mut parts = rest.splitn(2, ' ');
                         match (parts.next(), parts.next()) {
                             (Some(nick), Some(dm)) => store.send_mesh_dm(nick, dm),
-                            _ => store.log_nearby("usage: /msg <nick> <text>"),
+                            _ => store.log_mesh("usage: /msg <nick> <text>"),
                         }
                     }
                     (Some("dm"), Some(nick)) => {
                         let nick = nick.trim();
                         match store.open_dm(nick) {
                             Some(peer) => self.space = Space::Person(peer.0, peer.1),
-                            None => store.log_nearby(format!("no mesh peer named {nick}")),
+                            None => store.log_mesh(format!("no mesh peer named {nick}")),
                         }
                     }
-                    (Some("back"), _) => self.space = Space::Nearby,
+                    (Some("back"), _) => self.space = Space::Mesh,
                     (Some("peers"), _) => {
                         let names = store.people(crate::store::now_secs())
                             .into_iter()
@@ -257,9 +257,9 @@ impl ChatView {
                             .map(|p| p.nickname)
                             .collect::<Vec<_>>();
                         if names.is_empty() {
-                            store.log_nearby("nobody in range right now");
+                            store.log_mesh("nobody in range right now");
                         } else {
-                            store.log_nearby(format!("in range: {}", names.join(", ")));
+                            store.log_mesh(format!("in range: {}", names.join(", ")));
                         }
                     }
                     (Some("help"), _) => store.system_line(
@@ -270,18 +270,18 @@ impl ChatView {
                         self.browsing = true;
                         self.space = Space::Channel;
                     }
-                    (Some("nick"), None) => store.log_nearby("usage: /nick <name>"),
-                    (Some("msg"), None) => store.log_nearby("usage: /msg <nick> <text>"),
-                    (Some("dm"), None) => store.log_nearby("usage: /dm <nick>"),
+                    (Some("nick"), None) => store.log_mesh("usage: /nick <name>"),
+                    (Some("msg"), None) => store.log_mesh("usage: /msg <nick> <text>"),
+                    (Some("dm"), None) => store.log_mesh("usage: /dm <nick>"),
                     (Some(other), _) => {
-                        store.log_nearby(format!("unknown command /{other}"))
+                        store.log_mesh(format!("unknown command /{other}"))
                     }
                     (None, _) => {}
                 }
             });
         } else {
             match &self.space {
-                Space::Nearby => self.store.update(cx, |store, _| store.send_nearby(&text)),
+                Space::Mesh => self.store.update(cx, |store, _| store.send_mesh(&text)),
                 Space::Channel => self.store.update(cx, |store, _| store.send_channel(&text)),
                 Space::Person(peer, _) => {
                     let peer = *peer;
@@ -325,7 +325,7 @@ impl Render for ChatView {
             Vec::new()
         } else {
             match &space {
-                Space::Nearby => self.store.update(cx, |store, _| store.nearby.clone()),
+                Space::Mesh => self.store.update(cx, |store, _| store.mesh.clone()),
                 Space::Channel => self.store.update(cx, |store, _| store.channel.clone()),
                 Space::Person(peer, _) => self.store.update(cx, |store, _| {
                     store
@@ -375,7 +375,7 @@ impl Render for ChatView {
 
         // Contextual composer hint.
         let placeholder: SharedString = match &space {
-            Space::Nearby => "message everyone in range. /help lists commands".into(),
+            Space::Mesh => "message everyone in range. /help lists commands".into(),
             Space::Channel if browsing => "/join <geohash>: pick a row above or type one".into(),
             Space::Channel => match &geohash {
                 Some(g) => format!("message #{g}").into(),
@@ -388,7 +388,7 @@ impl Render for ChatView {
 
         // Header: space identity + one status line of meta.
         let (title, meta, _meta_hue) = match &space {
-            Space::Nearby => (
+            Space::Mesh => (
                 "mesh".to_string(),
                 if restarting {
                     "radio restarting\u{2026}".to_string()
@@ -458,7 +458,7 @@ impl Render for ChatView {
                         "mesh",
                         "\u{25c7} mesh",
                         MESH,
-                        space == Space::Nearby,
+                        space == Space::Mesh,
                         Some(if restarting {
                             "\u{25cb} restarting\u{2026}".to_string()
                         } else if !mesh_up {
@@ -467,7 +467,7 @@ impl Render for ChatView {
                             format!("{mesh_peers}")
                         }),
                         cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.space = Space::Nearby;
+                            this.space = Space::Mesh;
                             this.store.update(cx, |store, _| store.end_browse());
                             this.browsing = false;
                             cx.notify();
@@ -983,7 +983,7 @@ impl ChatView {
             return None;
         }
         let (glyph, message, hint): (&str, String, String) = match space {
-            Space::Nearby => (
+            Space::Mesh => (
                 "\u{25c7}",
                 "no one in range yet".into(),
                 "people show up here when their phone is nearby with the app open".into(),

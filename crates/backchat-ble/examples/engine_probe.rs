@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        None => eprintln!("probe: ANNOUNCE from {} — TLV DECODE FAILED", sender.full()),
+                        None => eprintln!("probe: ANNOUNCE from {} — TLV decode failed", sender.full()),
                     }
                 }
                 for action in engine.on_bytes(&raw, now_ms()) {

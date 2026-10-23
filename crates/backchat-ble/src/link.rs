@@ -761,7 +761,7 @@ async fn run_remote(
                         backoff *= 2;
                     }
                     Ok(Err(err)) => {
-                        eprintln!("{} remote {}: connect FAILED permanently: {err}", ts(), device.address());
+                        eprintln!("{} remote {}: connect failed, giving up: {err}", ts(), device.address());
                         return Err(err);
                     }
                     Err(_) => {
@@ -883,7 +883,7 @@ async fn run_remote(
             n
         }
         Err(e) => {
-            eprintln!("{} remote {}: notify FAILED: {e}", ts(), device.address());
+            eprintln!("{} remote {}: notify failed: {e}", ts(), device.address());
             return Err(e);
         }
     };
@@ -945,7 +945,7 @@ async fn run_remote(
                         match result {
                             Ok(true) => {}
                             Ok(false) => crate::radio_log!("{} remote {}: short write", ts(), device.address()),
-                            Err(e) => crate::radio_log!("{} remote {}: write FAILED: {e}", ts(), device.address()),
+                            Err(e) => crate::radio_log!("{} remote {}: write failed: {e}", ts(), device.address()),
                         }
                     }
                     None => return Ok(()),
