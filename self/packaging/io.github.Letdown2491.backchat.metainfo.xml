@@ -38,6 +38,17 @@
   </content_rating>
 
   <releases>
+    <release version="0.2.0" date="2026-10-22">
+      <description>
+        <p>Desktop notifications for mentions and DMs, fingerprint
+        verification for mesh peers, channel discovery with participant
+        counts, and relay session management. Chat log overlap fixed and
+        long logs made properly scrollable. Considerably leaner under
+        load (batched event handling, cached rendering) with a security
+        pass: private key material now stored owner-only and attacker
+        controlled input hardened.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-22">
       <description>
         <p>First aarch64 release: Linux phones and ARM laptops install the

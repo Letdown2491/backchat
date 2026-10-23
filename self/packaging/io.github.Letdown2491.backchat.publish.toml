@@ -26,7 +26,7 @@ homepage = "https://github.com/Letdown2491/backchat"
 
 [release]
 # Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
-version = "0.1.1"
+version = "0.2.0"
 channel = "stable"
 arch = "linux-x86_64"
 # The listing declares coverage for both arches and is identical from

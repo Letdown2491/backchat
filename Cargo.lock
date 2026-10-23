@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "backchat"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd 0.12.3",
@@ -523,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "backchat-ble"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "backchat-core",
  "bluer",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "backchat-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "backchat-nostr"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "backchat-core",
  "base64",
