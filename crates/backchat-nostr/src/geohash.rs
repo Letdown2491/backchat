@@ -50,10 +50,22 @@ pub fn create_ephemeral_geohash_event(
     nickname: Option<&str>,
     teleported: bool,
 ) -> NostrEvent {
+    create_ephemeral_geohash_event_at(content, geohash, sender, nickname, teleported, now_secs())
+}
+
+/// Same, with an explicit timestamp (tests backdate traffic this way).
+pub fn create_ephemeral_geohash_event_at(
+    content: &str,
+    geohash: &str,
+    sender: &Identity,
+    nickname: Option<&str>,
+    teleported: bool,
+    created_at: i64,
+) -> NostrEvent {
     let tags = ephemeral_geohash_tags(geohash, nickname, teleported);
     let event = NostrEvent::unsigned(
         sender.public_key_hex(),
-        now_secs(),
+        created_at,
         kinds::EPHEMERAL_EVENT,
         tags,
         content.to_string(),

@@ -56,17 +56,22 @@ struct Peer {
 const MAX_DM_HISTORY: usize = 500;
 
 /// One geohash's observed activity during a discovery scan. The
-/// distinct-sender set is capped: past the cap, `people` undercounts
-/// rather than the table growing without bound.
+/// sender map is per-sender last-event time so people counts can window
+/// to the phone's 5-minute presence semantics; the set is capped: past
+/// the cap, `people` undercounts rather than the table growing without
+/// bound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ScanCell {
     msgs: u32,
-    senders: HashSet<String>,
+    senders: HashMap<String, i64>,
     last: i64,
 }
 
 /// Max tracked distinct senders per scanned cell.
-const SCAN_SENDERS_CAP: usize = 128;
+const SCAN_SENDERS_CAP: usize = 512;
+/// A scanned cell's people window: the phone counts a geohash participant
+/// active if their last chat or presence event is within 5 minutes.
+const SCAN_WINDOW_SECS: i64 = 300;
 
 /// Public shape of a scan row for the browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,17 +273,10 @@ impl ChatStore {
         self.end_browse();
         self.note_channel_visit(&geohash_str);
 
-        // Re-pick the relay set: nearest 5 relays to this cell, exactly as
-        // upstream selects them, so peers in the channel are reachable.
-        let relays = backchat_nostr::relay_geo::closest_relays(
-            &self.directory,
-            &geohash_str,
-            backchat_nostr::relay_geo::RELAYS_PER_CHANNEL,
-        );
-        if !relays.is_empty() {
-            let _ = self.relay_tx.send(RelayCommand::SetRelays(relays.clone()));
-            self.log_channel(format!("relays: {}", relays.join(", ")));
-        }
+        // Re-pick the relay set: this cell's nearest relays (exactly as
+        // upstream selects them, so peers in the channel are reachable)
+        // plus the location ladder's cells for the browser's counts.
+        self.apply_relays();
 
         let filter = backchat_nostr::relay::geohash_filter(&geohash_str, 3600);
         let _ = self.relay_tx.send(RelayCommand::Subscribe(vec![Subscription::new(filter)]));
@@ -696,6 +694,44 @@ impl ChatStore {
     pub fn set_geo_fix(&mut self, fix: Option<GeoFix>) {
         self.geo_loading = false;
         self.geo = fix;
+        // The ladder (and with it the useful relay set) just became known:
+        // re-pick so the browser's counts see the nearby cells' relays.
+        if self.geohash.is_some() {
+            self.apply_relays();
+        }
+    }
+
+    /// Relay set = the joined cell's closest relays (upstream's selection)
+    /// plus each location-ladder cell's closest few, capped. The phone
+    /// publishes and reads presence heartbeats (kind 20001) on a cell's
+    /// closest relays, so watching them is what makes the browser's
+    /// people counts see the same lurkers the phone sees.
+    fn watch_relays(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push = |cell: &str, count: usize| {
+            for url in backchat_nostr::relay_geo::closest_relays(&self.directory, cell, count) {
+                if !out.contains(&url) {
+                    out.push(url);
+                }
+            }
+        };
+        if let Some(gh) = &self.geohash {
+            push(gh, backchat_nostr::relay_geo::RELAYS_PER_CHANNEL);
+        }
+        for (gh, _, _) in self.ladder() {
+            push(&gh, 3);
+        }
+        out.truncate(12);
+        out
+    }
+
+    /// Send the current relay set (joined cell + location ladder).
+    fn apply_relays(&mut self) {
+        let relays = self.watch_relays();
+        if !relays.is_empty() {
+            let _ = self.relay_tx.send(RelayCommand::SetRelays(relays.clone()));
+            self.log_channel(format!("relays: {}", relays.join(", ")));
+        }
     }
 
     /// The location ladder: parent cells of the estimated position, one
@@ -754,9 +790,21 @@ impl ChatStore {
     fn note_scan(&mut self, gh: &str, pubkey: &str, created_at: i64) {
         let cell = self.scan.entry(gh.to_string()).or_default();
         cell.msgs += 1;
-        if cell.senders.len() < SCAN_SENDERS_CAP {
-            cell.senders.insert(pubkey.to_string());
+        if cell.senders.len() >= SCAN_SENDERS_CAP {
+            // Keep the freshest half, drop the stale rest.
+            let mut stale: Vec<String> = cell
+                .senders
+                .iter()
+                .filter(|(_, seen)| **seen < created_at - SCAN_WINDOW_SECS)
+                .map(|(k, _)| k.clone())
+                .collect();
+            stale.sort_by_key(|k| cell.senders[k]);
+            let drop = stale.len().min(cell.senders.len() / 2);
+            for k in stale.into_iter().take(drop) {
+                cell.senders.remove(&k);
+            }
         }
+        cell.senders.insert(pubkey.to_string(), created_at);
         cell.last = cell.last.max(created_at);
         // Keep the table bounded on a busy network.
         if self.scan.len() > 200 {
@@ -771,15 +819,17 @@ impl ChatStore {
         }
     }
 
-    /// Scan rows for the browser: busiest first.
+    /// Scan rows for the browser: busiest first. People is the 5-minute
+    /// window count, matching the phone's participant semantics.
     pub fn scan_rows(&self) -> Vec<ScanEntry> {
+        let now = now_secs();
         let mut rows: Vec<ScanEntry> = self
             .scan
             .iter()
             .map(|(gh, c)| ScanEntry {
                 geohash: gh.clone(),
                 msgs: c.msgs,
-                people: c.senders.len(),
+                people: c.senders.values().filter(|seen| now - **seen < SCAN_WINDOW_SECS).count(),
                 last: c.last,
             })
             .collect();
@@ -835,8 +885,13 @@ impl ChatStore {
     }
 
     /// Count of peers seen in the last 10 minutes.
+    /// Participants "here" in the joined channel, matching the phone's
+    /// counting: distinct pubkeys seen in the last 5 minutes via chat or
+    /// presence events, plus ourselves (the phone records its own key on
+    /// channel switch).
     pub fn peers_here(&self, now: i64) -> usize {
-        self.peers.values().filter(|p| now - p.last_seen < 600).count()
+        let peers = self.peers.values().filter(|p| now - p.last_seen < 300).count();
+        peers + usize::from(self.geohash.is_some())
     }
 
 }
@@ -1119,6 +1174,49 @@ mod tests {
         store.set_verified(&fp, false);
         assert!(!store.is_verified_fingerprint(&fp));
         assert!(store.settings.verified.is_empty());
+    }
+
+    #[test]
+    fn scan_people_window_matches_the_phone() {
+        let (relay_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RelayCommand>();
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), relay_tx, None);
+        store.begin_browse();
+
+        // A fresh sender and one whose only event is ten minutes old:
+        // both happened, only the fresh one is "here".
+        store.on_relay_event(geohash::create_ephemeral_geohash_event(
+            "fresh",
+            "dr5rs",
+            &Identity::generate(),
+            None,
+            false,
+        ));
+        store.on_relay_event(geohash::create_ephemeral_geohash_event_at(
+            "old msg",
+            "dr5rs",
+            &Identity::generate(),
+            None,
+            false,
+            now_secs() - 600,
+        ));
+        let row = store
+            .scan_rows()
+            .into_iter()
+            .find(|r| r.geohash == "dr5rs")
+            .expect("scanned cell");
+        assert_eq!(row.msgs, 2);
+        assert_eq!(row.people, 1);
+    }
+
+    #[test]
+    fn here_counts_self_and_uses_the_five_minute_window() {
+        let (relay_tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RelayCommand>();
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(), relay_tx, None);
+        // Nobody "here" before a channel is joined.
+        assert_eq!(store.peers_here(now_secs()), 0);
+        store.join("dr5rs");
+        // The phone counts the user's own presence; so do we.
+        assert_eq!(store.peers_here(now_secs()), 1);
     }
 
     #[test]

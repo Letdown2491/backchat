@@ -1178,6 +1178,10 @@ impl ChatView {
         let (geo_loading, scanning) = self
             .store
             .update(cx, |store, _| (store.geo_loading(), store.scanning()));
+        let scan = self.store.read(cx).scan_rows();
+        // People counts by cell, for the ladder rows and the mask rule.
+        let counts: std::collections::HashMap<String, usize> =
+            scan.iter().map(|r| (r.geohash.clone(), r.people)).collect();
         let ladder = self.store.read(cx).ladder();
         let history: Vec<(String, i64)> = self
             .store
@@ -1186,7 +1190,6 @@ impl ChatView {
             .iter()
             .map(|m| (m.geohash.clone(), m.last_seen))
             .collect();
-        let scan = self.store.read(cx).scan_rows();
 
         let ladder: Vec<_> = ladder.into_iter().filter(|(gh, ..)| keep(gh)).collect();
         let history: Vec<_> = history.into_iter().filter(|(gh, _)| keep(gh)).collect();
@@ -1199,10 +1202,17 @@ impl ChatView {
         if !ladder.is_empty() {
             kids.push(section_label("FROM YOUR LOCATION (EST.)"));
             kids.extend(ladder.into_iter().map(|(gh, level, label)| {
+                // Phone parity: exact count once traffic is seen; "?" for
+                // high-precision cells where nobody announces presence.
+                let people = match counts.get(&gh) {
+                    Some(n) if *n > 0 || gh.len() < 6 => format!("{n} people \u{b7} "),
+                    Some(_) => "? people \u{b7} ".into(),
+                    None => String::new(),
+                };
                 let meta = if label.is_empty() {
-                    level.to_string()
+                    format!("{people}{level}")
                 } else {
-                    format!("{level} \u{b7} {label}")
+                    format!("{people}{level} \u{b7} {label}")
                 };
                 browse_row("loc", &gh, meta, cx)
             }));
@@ -1220,13 +1230,18 @@ impl ChatView {
         if !scan.is_empty() {
             kids.push(section_label("ACTIVE RIGHT NOW"));
             kids.extend(scan.into_iter().map(|r| {
+                let people = if r.people == 0 && r.geohash.len() >= 6 {
+                    "?".to_string()
+                } else {
+                    r.people.to_string()
+                };
                 browse_row(
                     "scan",
                     &r.geohash,
                     format!(
                         "{} msg \u{b7} {} people \u{b7} {} ago",
                         r.msgs,
-                        r.people,
+                        people,
                         rel_time(now - r.last)
                     ),
                     cx,
