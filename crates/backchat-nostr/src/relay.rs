@@ -61,6 +61,23 @@ pub enum RelayEvent {
 
 static SUB_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Failed connects in a row before a relay is treated as down and its
+/// retries slow to `DEAD_RELAY_WAIT`. The geo directory is a living CSV:
+/// dead hosts land in the closest-5 set, and a 502ing relay used to pump
+/// a connect attempt and a log line every few seconds for the life of
+/// the process.
+const DEAD_RELAY_FAILURES: u32 = 5;
+const DEAD_RELAY_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Wait before the next connect attempt: short doubling backoff while
+/// the relay looks alive, then the slow probe once it looks dead.
+fn next_wait(failures: u32, backoff: std::time::Duration) -> std::time::Duration {
+    if failures >= DEAD_RELAY_FAILURES {
+        return DEAD_RELAY_WAIT;
+    }
+    (backoff * 2).min(std::time::Duration::from_secs(60))
+}
+
 fn unique_sub_id() -> String {
     format!("backchat-{}", SUB_COUNTER.fetch_add(1, Ordering::Relaxed))
 }
@@ -198,10 +215,20 @@ async fn relay_session(
     // Snapshot of the current subscription set, re-sent on every
     // (re)connect so a dropped session resumes its REQs.
     let mut current_subs: Vec<Subscription> = Vec::new();
+    // Only a session that connected has a connection to lose: a failed
+    // connect must not drag the status banner down (the -1 delta pairs
+    // with a +1 that was never sent).
+    let mut was_connected = false;
+    // Consecutive failed connects. Past a few, the relay is almost
+    // certainly down (or junk): slow the retries to one per
+    // DEAD_RELAY_WAIT and say so once instead of every attempt.
+    let mut failures = 0u32;
     'session: loop {
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 eprintln!("[relay] connected: {url}");
+                was_connected = true;
+                failures = 0;
                 let _ = evt_tx.send(RelayEvent::Status { delta: 1 });
                 backoff = std::time::Duration::from_secs(1);
                 let (mut write, mut read) = ws.split();
@@ -260,9 +287,19 @@ async fn relay_session(
             }
             Err(e) => eprintln!("[relay] connect failed: {url}: {e}"),
         }
-        let _ = evt_tx.send(RelayEvent::Status { delta: -1 });
+        if was_connected {
+            let _ = evt_tx.send(RelayEvent::Status { delta: -1 });
+            was_connected = false;
+        }
+        failures += 1;
+        if failures == DEAD_RELAY_FAILURES {
+            eprintln!(
+                "[relay] {url}: {failures} connect failures in a row, retrying every {} s",
+                DEAD_RELAY_WAIT.as_secs()
+            );
+        }
+        backoff = next_wait(failures, backoff);
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(std::time::Duration::from_secs(60));
     }
 }
 
@@ -318,6 +355,19 @@ mod tests {
         let a = Subscription::new(serde_json::json!({}));
         let b = Subscription::new(serde_json::json!({}));
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn dead_relays_slow_to_a_quiet_probe() {
+        // The session compounds the backoff across attempts, like the
+        // loop does.
+        let mut backoff = std::time::Duration::from_secs(1);
+        for failures in 1..DEAD_RELAY_FAILURES {
+            backoff = next_wait(failures, backoff);
+        }
+        assert_eq!(backoff, std::time::Duration::from_secs(16));
+        assert_eq!(next_wait(DEAD_RELAY_FAILURES, backoff), DEAD_RELAY_WAIT);
+        assert_eq!(next_wait(99, backoff), DEAD_RELAY_WAIT);
     }
 }
 
