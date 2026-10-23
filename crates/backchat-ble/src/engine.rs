@@ -59,7 +59,10 @@ pub enum Action {
 
 #[derive(Debug, Clone)]
 pub enum MeshEvent {
-    PeerSeen { peer_id: [u8; 8], nickname: String, is_new: bool },
+    /// The node is up; carries our own Noise static public key (the
+    /// fingerprint of ours is what verification shows next to a peer's).
+    Started { noise_public_key: [u8; 32] },
+    PeerSeen { peer_id: [u8; 8], nickname: String, noise_public_key: [u8; 32], is_new: bool },
     PeerExpired { peer_id: [u8; 8] },
     PublicMessage { sender_id: [u8; 8], nickname: String, content: String, timestamp: u64 },
     PrivateMessage { sender_id: [u8; 8], nickname: String, content: String, message_id: String },
@@ -135,6 +138,11 @@ impl Engine {
 
     pub fn peer_id(&self) -> [u8; 8] {
         self.identity.peer_id().mesh_bytes().expect("8-byte id")
+    }
+
+    /// Our own Noise static public key (fingerprint source for /fingerprint).
+    pub fn noise_public_key(&self) -> [u8; 32] {
+        self.identity.noise.public_key
     }
 
     pub fn nickname(&self) -> &str {
@@ -261,6 +269,7 @@ impl Engine {
         actions.push(Action::Event(MeshEvent::PeerSeen {
             peer_id: sender_id,
             nickname: announce.nickname,
+            noise_public_key: announce.noise_public_key,
             is_new,
         }));
 

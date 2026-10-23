@@ -82,6 +82,14 @@ impl PeerId {
         Self::from_mesh_bytes(&digest)
     }
 
+    /// The full identity fingerprint: lowercase hex of SHA-256 of the
+    /// Noise static public key. This is what verification compares, the
+    /// same 64-char string the phone clients show.
+    pub fn fingerprint_hex(pk: &[u8; NOISE_PUBKEY_LEN]) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(pk))
+    }
+
     pub fn full(&self) -> String {
         format!("{}{}", self.prefix.as_str(), self.bare)
     }
@@ -104,5 +112,21 @@ impl PeerId {
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.full())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_prefix_matches_the_mesh_id() {
+        let key = [7u8; 32];
+        let fp = PeerId::fingerprint_hex(&key);
+        assert_eq!(fp.len(), 64);
+        // The mesh ID is the fingerprint's first 8 bytes: the two views of
+        // an identity must agree.
+        let id = PeerId::from_noise_static_public_key(&key);
+        assert!(id.full().ends_with(&fp[..16]));
     }
 }

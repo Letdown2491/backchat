@@ -118,6 +118,16 @@ pub async fn spawn(config: MeshConfig) -> Result<NodeHandle, NodeError> {
 
     let task = tokio::spawn(async move {
         let mut engine = Engine::new(identity, config.nickname.clone());
+        // Tell the UI our Noise static public key up front: /fingerprint
+        // shows ours even before any peer shows up.
+        let own_noise_key = engine.noise_public_key();
+        if events_tx
+            .send(MeshEvent::Started { noise_public_key: own_noise_key })
+            .await
+            .is_err()
+        {
+            return;
+        }
         let mut announce =
             tokio::time::interval(Duration::from_millis(config.announce_interval_ms));
         announce.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

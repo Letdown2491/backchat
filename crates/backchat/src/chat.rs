@@ -32,7 +32,10 @@ const RELAY: u32 = 0x6ea8fe; // channel / relays
 const PRIVATE: u32 = 0xb8a1f5; // DMs
 
 /// Commands the slash menu completes while typing.
-const COMMANDS: [&str; 7] = ["/join", "/nick", "/msg", "/dm", "/back", "/peers", "/help"];
+const COMMANDS: [&str; 10] = [
+    "/join", "/nick", "/msg", "/dm", "/back", "/peers", "/fingerprint", "/verify", "/unverify",
+    "/help",
+];
 
 /// Which conversation fills the main area, and where the composer sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,8 +298,71 @@ impl ChatView {
                             store.log_mesh(format!("in range: {}", names.join(", ")));
                         }
                     }
+                    (Some("fingerprint"), _) => {
+                        // Upstream's layout: uppercase hex, groups of four,
+                        // one line per 16 chars, so two humans can diff the
+                        // blocks by eye. Theirs first (needs a handshake),
+                        // then ours.
+                        match &self.space {
+                            Space::Person(peer, nick) => {
+                                let (peer, nick) = (*peer, nick.clone());
+                                match store.peer_fingerprint(&peer) {
+                                    Some(fp) => {
+                                        store.system_line(format!("{nick}'s fingerprint:"));
+                                        store.system_line(format_fingerprint(&fp));
+                                        store.system_line(if store.is_verified_fingerprint(&fp) {
+                                            "verified"
+                                        } else {
+                                            "not verified: compare the blocks with them in person or over a call, then /verify"
+                                        });
+                                    }
+                                    None => store.system_line(
+                                        "no handshake yet: their fingerprint shows up after the first message",
+                                    ),
+                                }
+                            }
+                            _ => store.log_mesh("open a private chat first (/dm <nick>)"),
+                        }
+                        match store.my_fingerprint() {
+                            Some(fp) => {
+                                store.system_line("your fingerprint:");
+                                store.system_line(format_fingerprint(&fp));
+                            }
+                            None => store
+                                .system_line("your fingerprint shows up once the mesh radio is up"),
+                        }
+                    }
+                    (Some("verify"), _) => match &self.space {
+                        Space::Person(peer, nick) => {
+                            let (peer, nick) = (*peer, nick.clone());
+                            match store.peer_fingerprint(&peer) {
+                                Some(fp) => {
+                                    store.set_verified(&fp, true);
+                                    store.system_line(format!(
+                                        "{nick} verified: you compared fingerprints out of band"
+                                    ));
+                                }
+                                None => store
+                                    .system_line("no handshake yet: nothing to verify"),
+                            }
+                        }
+                        _ => store.log_mesh("/verify works in a private chat (/dm <nick>)"),
+                    },
+                    (Some("unverify"), _) => match &self.space {
+                        Space::Person(peer, nick) => {
+                            let (peer, nick) = (*peer, nick.clone());
+                            match store.peer_fingerprint(&peer) {
+                                Some(fp) => {
+                                    store.set_verified(&fp, false);
+                                    store.system_line(format!("{nick}: verification removed"));
+                                }
+                                None => store.system_line("no handshake yet: nothing to unverify"),
+                            }
+                        }
+                        _ => store.log_mesh("/unverify works in a private chat (/dm <nick>)"),
+                    },
                     (Some("help"), _) => store.system_line(
-                        "commands: /join <geohash> · /nick <name> · /dm <nick> · /msg <nick> <text> · /peers · /back",
+                        "commands: /join <geohash> · /nick <name> · /dm <nick> · /msg <nick> <text> · /peers · /fingerprint · /verify · /unverify · /back",
                     ),
                     (Some("join"), None) => {
                         store.begin_browse();
@@ -349,6 +415,16 @@ impl Render for ChatView {
                 )
             });
         let space = self.space.clone();
+        // Verified state for the open DM (drives the header suffix).
+        let dm_verified = match &space {
+            Space::Person(peer, _) => self.store.update(cx, |store, _| {
+                store
+                    .peer_fingerprint(peer)
+                    .map(|fp| store.is_verified_fingerprint(&fp))
+                    .unwrap_or(false)
+            }),
+            _ => false,
+        };
 
         // The channel browser replaces the log when open.
         let browsing = self.browsing && matches!(space, Space::Channel);
@@ -451,7 +527,10 @@ impl Render for ChatView {
             },
             Space::Person(_, nick) => (
                 nick.clone(),
-                "private \u{b7} end-to-end encrypted".to_string(),
+                format!(
+                    "private \u{b7} end-to-end encrypted \u{b7} {}",
+                    if dm_verified { "verified" } else { "not verified" }
+                ),
                 PRIVATE,
             ),
         };
@@ -905,6 +984,14 @@ fn person_row(
                 .text_ellipsis()
                 .child(row.nickname.clone()),
         )
+        .when(row.verified, |r| {
+            r.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(0x4ade80))
+                    .child("\u{2713}"),
+            )
+        })
         .when(row.unread > 0, |r| {
             r.child(
                 div()
@@ -1197,6 +1284,21 @@ mod tests {
         assert_eq!(day_label(20_741), "Oct 15 2026");
         assert_eq!(day_label(20_742), "Oct 16 2026");
     }
+}
+
+/// Upstream's fingerprint layout: uppercase hex, groups of four, a
+/// newline every 16 chars (four lines for the 64-char string), so two
+/// humans can diff the blocks by eye.
+fn format_fingerprint(fp: &str) -> String {
+    let upper = fp.to_uppercase();
+    let mut out = String::new();
+    for (i, ch) in upper.chars().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push(if i % 16 == 0 { '\n' } else { ' ' });
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One virtualized log row (and its day separator when the day changed): a

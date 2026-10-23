@@ -19,6 +19,10 @@ pub struct Settings {
     /// "your channels" section, newest first, capped.
     #[serde(default)]
     pub channels: Vec<ChannelMemo>,
+    /// Mesh fingerprints (lowercase hex of SHA-256 of the Noise static
+    /// key) the user marked verified after comparing out of band.
+    #[serde(default)]
+    pub verified: Vec<String>,
 }
 
 /// One remembered channel visit.
@@ -113,6 +117,7 @@ mod tests {
             geohash: "dr5rs".into(),
             relays: vec!["wss://relay.example".into()],
             channels: vec![ChannelMemo { geohash: "9q8yy".into(), last_seen: 0 }],
+            verified: vec!["abcd".into()],
         };
         save_settings_in(&dir, &settings).unwrap();
         assert_eq!(load_settings_in(&dir), settings);

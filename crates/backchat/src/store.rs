@@ -11,6 +11,7 @@ use backchat_nostr::event::{kinds, NostrEvent};
 use backchat_nostr::geohash;
 use backchat_nostr::identity::Identity;
 use backchat_nostr::relay::{RelayCommand, Subscription};
+use backchat_core::peer_id::PeerId;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -30,6 +31,8 @@ pub struct PersonRow {
     pub nickname: String,
     pub unread: usize,
     pub online: bool,
+    /// The peer's Noise fingerprint is in the verified set.
+    pub verified: bool,
 }
 
 /// One line of a private conversation with a mesh peer.
@@ -93,7 +96,10 @@ pub struct ChatStore {
     /// BLE mesh node command channel (None when bluetooth is unavailable).
     pub mesh_tx: Option<tokio::sync::mpsc::Sender<MeshCommand>>,
     /// mesh peer id → (nickname, last_seen secs).
-    mesh_peers: HashMap<[u8; 8], (String, i64)>,
+    mesh_peers: HashMap<[u8; 8], (String, i64, [u8; 32])>,
+    /// Our own Noise static public key (from the radio's Started event);
+    /// the fingerprint source for /fingerprint.
+    my_noise_key: Option<[u8; 32]>,
     /// Radio lifecycle: true while the link layer is rebuilding.
     mesh_restarting: bool,
     /// Private conversation history per mesh peer, newest last.
@@ -153,6 +159,7 @@ impl ChatStore {
             relay_tx,
             mesh_tx,
             mesh_peers: HashMap::new(),
+            my_noise_key: None,
             dms: HashMap::new(),
             unread: HashMap::new(),
             mesh_restarting: false,
@@ -174,6 +181,38 @@ impl ChatStore {
     fn mentions_me(&self, text: &str) -> bool {
         let nick = self.settings.nickname.trim();
         !nick.is_empty() && text.to_lowercase().contains(&nick.to_lowercase())
+    }
+
+    /// Our own mesh fingerprint, once the radio announced it.
+    pub fn my_fingerprint(&self) -> Option<String> {
+        self.my_noise_key.as_ref().map(|k| PeerId::fingerprint_hex(k))
+    }
+
+    /// A mesh peer's fingerprint, from their last announce.
+    pub fn peer_fingerprint(&self, peer: &[u8; 8]) -> Option<String> {
+        self.mesh_peers
+            .get(peer)
+            .map(|(_, _, k)| PeerId::fingerprint_hex(k))
+    }
+
+    /// Is this fingerprint (hex, any case) in the verified set?
+    pub fn is_verified_fingerprint(&self, fp: &str) -> bool {
+        self.settings.verified.iter().any(|v| v.eq_ignore_ascii_case(fp))
+    }
+
+    /// Mark a fingerprint verified (or not) and remember it across
+    /// restarts. Verified means: compared out of band and they match.
+    pub fn set_verified(&mut self, fp: &str, verified: bool) {
+        let fp = fp.to_lowercase();
+        if verified {
+            if !self.settings.verified.contains(&fp) {
+                self.settings.verified.push(fp);
+                self.persist();
+            }
+        } else if self.settings.verified.contains(&fp) {
+            self.settings.verified.retain(|v| *v != fp);
+            self.persist();
+        }
     }
 
     /// Queue a notification for portal delivery (the pumps drain this).
@@ -394,14 +433,17 @@ impl ChatStore {
     /// Handle one inbound BLE mesh event.
     pub fn on_mesh_event(&mut self, event: MeshEvent) {
         match event {
-            MeshEvent::PeerSeen { peer_id, nickname, is_new } => {
+            MeshEvent::Started { noise_public_key } => {
+                self.my_noise_key = Some(noise_public_key);
+            }
+            MeshEvent::PeerSeen { peer_id, nickname, noise_public_key, is_new } => {
                 if is_new {
                     self.log_mesh(format!("{nickname} is here"));
                 }
-                self.mesh_peers.insert(peer_id, (nickname, now_secs()));
+                self.mesh_peers.insert(peer_id, (nickname, now_secs(), noise_public_key));
             }
             MeshEvent::PeerExpired { peer_id } => {
-                if let Some((nick, _)) = self.mesh_peers.remove(&peer_id) {
+                if let Some((nick, _, _)) = self.mesh_peers.remove(&peer_id) {
                     self.log_mesh(format!("{nick} left"));
                 }
             }
@@ -486,8 +528,8 @@ impl ChatStore {
     pub fn resolve_peer(&self, nick: &str) -> Option<([u8; 8], String)> {
         self.mesh_peers
             .iter()
-            .find(|(_, (n, _))| n.eq_ignore_ascii_case(nick))
-            .map(|(k, (n, _))| (*k, n.clone()))
+            .find(|(_, (n, _, _))| n.eq_ignore_ascii_case(nick))
+            .map(|(k, (n, _, _))| (*k, n.clone()))
     }
 
     /// Open a private conversation with a peer by nickname. Returns the
@@ -518,11 +560,12 @@ impl ChatStore {
         let mut rows: Vec<PersonRow> = self
             .mesh_peers
             .iter()
-            .map(|(id, (nick, seen))| PersonRow {
+            .map(|(id, (nick, seen, key))| PersonRow {
                 peer_id: *id,
                 nickname: nick.clone(),
                 unread: self.unread.get(id).copied().unwrap_or(0),
                 online: now - seen < 600,
+                verified: self.is_verified_fingerprint(&PeerId::fingerprint_hex(key)),
             })
             .collect();
         for (id, unread) in &self.unread {
@@ -540,6 +583,7 @@ impl ChatStore {
                 nickname: nick,
                 unread: *unread,
                 online: false,
+                verified: false,
             });
         }
         rows.sort_by_key(|r| {
@@ -565,7 +609,7 @@ impl ChatStore {
         let in_range = self
             .mesh_peers
             .get(&peer_id)
-            .is_some_and(|(_, seen)| now_secs() - seen < 600);
+            .is_some_and(|(_, seen, _)| now_secs() - seen < 600);
         if !in_range {
             let nick = self
                 .people(now_secs())
@@ -598,7 +642,7 @@ impl ChatStore {
 
     /// Count of mesh peers seen in the last 10 minutes.
     pub fn mesh_peer_count(&self, now: i64) -> usize {
-        self.mesh_peers.values().filter(|(_, seen)| now - seen < 600).count()
+        self.mesh_peers.values().filter(|(_, seen, _)| now - seen < 600).count()
     }
 
     /// True while the link layer is rebuilding (wedge recovery).
@@ -944,6 +988,7 @@ mod tests {
         store.on_mesh_event(MeshEvent::PeerSeen {
             peer_id: peer,
             nickname: "phone".into(),
+            noise_public_key: [2u8; 32],
             is_new: true,
         });
 
@@ -1042,6 +1087,41 @@ mod tests {
     }
 
     #[test]
+    fn verify_marks_a_peer_and_survives_via_settings() {
+        let mut store = store_with_channel();
+        let key = [3u8; 32];
+        store.on_mesh_event(MeshEvent::PeerSeen {
+            peer_id: [4u8; 8],
+            nickname: "phone".into(),
+            noise_public_key: key,
+            is_new: true,
+        });
+
+        let fp = store.peer_fingerprint(&[4u8; 8]).expect("fingerprint from announce");
+        assert_eq!(fp.len(), 64);
+        assert!(!store.is_verified_fingerprint(&fp));
+
+        store.set_verified(&fp, true);
+        assert!(store.is_verified_fingerprint(&fp));
+        // Case-insensitive lookup, stored lowercase.
+        assert!(store.is_verified_fingerprint(&fp.to_uppercase()));
+        assert_eq!(store.settings.verified, vec![fp.clone()]);
+
+        // The people rail shows the badge while the peer is live.
+        let row = store
+            .people(now_secs())
+            .into_iter()
+            .find(|r| r.peer_id == [4u8; 8])
+            .expect("row");
+        assert!(row.verified);
+
+        // Unverify clears it.
+        store.set_verified(&fp, false);
+        assert!(!store.is_verified_fingerprint(&fp));
+        assert!(store.settings.verified.is_empty());
+    }
+
+    #[test]
     fn out_of_range_dms_fail_honestly() {
         let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
         let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
@@ -1064,6 +1144,7 @@ mod tests {
         store.on_mesh_event(MeshEvent::PeerSeen {
             peer_id: peer,
             nickname: "phone".into(),
+            noise_public_key: [2u8; 32],
             is_new: true,
         });
         for i in 0..600 {
