@@ -9,6 +9,11 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+
+/// Relay frames are tiny (events bounded well under this): a per-message
+/// cap so a hostile relay cannot drive allocation.
+const MAX_RELAY_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscription {
@@ -242,7 +247,13 @@ async fn relay_session(
     // DEAD_RELAY_WAIT and say so once instead of every attempt.
     let mut failures = 0u32;
     'session: loop {
-        match tokio_tungstenite::connect_async(&url).await {
+        // Relay frames are small (a NIP-01 event is far under 1 MiB): cap
+        // tungstenite's 64 MiB default so a hostile relay cannot force
+        // large allocations per frame.
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_RELAY_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_RELAY_MESSAGE_BYTES);
+        match tokio_tungstenite::connect_async_with_config(&url, Some(config), false).await {
             Ok((ws, _)) => {
                 eprintln!("[relay] connected: {url}");
                 was_connected = true;
@@ -392,7 +403,10 @@ mod tests {
 /// Publish helper usable from tests and the app: opens a short-lived
 /// connection, sends the EVENT, waits for OK, closes.
 pub async fn publish_once(relay_url: &str, event: &NostrEvent) -> Result<(), String> {
-    let (ws, _) = tokio_tungstenite::connect_async(relay_url)
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(MAX_RELAY_MESSAGE_BYTES);
+    config.max_frame_size = Some(MAX_RELAY_MESSAGE_BYTES);
+    let (ws, _) = tokio_tungstenite::connect_async_with_config(relay_url, Some(config), false)
         .await
         .map_err(|e| format!("connect {relay_url}: {e}"))?;
     let (mut write, mut read) = ws.split();

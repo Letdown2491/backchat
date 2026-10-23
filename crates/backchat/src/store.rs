@@ -473,6 +473,7 @@ impl ChatStore {
                 self.my_noise_key = Some(noise_public_key);
             }
             MeshEvent::PeerSeen { peer_id, nickname, noise_public_key, is_new } => {
+                let nickname = clean_nick(&nickname);
                 if is_new {
                     self.log_mesh(format!("{nickname} is here"));
                 }
@@ -484,13 +485,16 @@ impl ChatStore {
                 }
             }
             MeshEvent::PublicMessage { nickname, content, timestamp, .. } => {
+                let nickname = clean_nick(&nickname);
                 let mention = self.mentions_me(&content) && !self.window_active;
                 let body = preview(&content);
                 self.push_mesh(ChatLine::Message {
                     sender: nickname.clone(),
                     content,
                     ours: false,
-                    timestamp: (timestamp / 1000) as i64,
+                    // Peer-supplied u64 millis: clamp instead of wrapping
+                    // negative through the as-cast.
+                    timestamp: (timestamp / 1000).min(i64::MAX as u64) as i64,
                 });
                 if mention {
                     self.ping(
@@ -520,6 +524,7 @@ impl ChatStore {
                 });
             }
             MeshEvent::PrivateMessage { sender_id, nickname, content, .. } => {
+                let nickname = clean_nick(&nickname);
                 if !self.window_active {
                     let body = preview(&content);
                     self.ping(
@@ -635,6 +640,13 @@ impl ChatStore {
     /// Send a DM to a resolved peer and echo it into the conversation.
     pub fn send_dm_to(&mut self, peer_id: [u8; 8], content: &str) {
         if content.trim().is_empty() {
+            return;
+        }
+        // The mesh private-message TLV carries the content in a u8 length
+        // field: refuse longer text honestly instead of failing the encode
+        // downstream.
+        if content.as_bytes().len() > 255 {
+            self.log_mesh("message too long for a mesh DM (255 byte limit)");
             return;
         }
         let Some(mesh_tx) = &self.mesh_tx else {
@@ -936,7 +948,7 @@ impl ChatStore {
             }
         }
         let peer = self.peers.entry(pubkey.to_string()).or_insert(Peer { nickname: None, last_seen: 0 });
-        if let Some(n) = nickname.filter(|n| !n.is_empty()) {
+        if let Some(n) = nickname.map(|n| clean_nick(&n)).filter(|n| !n.is_empty()) {
             peer.nickname = Some(n);
         }
         peer.last_seen = at;
@@ -972,6 +984,25 @@ pub fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Inbound nicknames are attacker-controlled: strip control characters
+/// (C0/C1, DEL) and the right-to-left override so a remote peer cannot
+/// garble the log or fake attribution with invisible bytes, trim, and cap
+/// the length. Display-only: nothing here reaches the wire.
+fn clean_nick(nickname: &str) -> String {
+    let cleaned: String = nickname
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\u{202e}')
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() > 64 {
+        trimmed.chars().take(64).collect()
+    } else if trimmed.is_empty() {
+        "anon".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn tag_value(tags: &[Vec<String>], key: &str) -> Option<String> {
@@ -1152,6 +1183,34 @@ mod tests {
             l,
             ChatLine::System { text } if text.contains("phone sent you a private message")
         )));
+    }
+
+    #[test]
+    fn oversized_mesh_dms_are_refused_not_sent() {
+        // The private-message TLV carries content in a u8 length field;
+        // a longer DM must be refused with a log line, not fail the
+        // encode downstream (or panic the engine).
+        let (mesh_tx, mut mesh_rx) = tokio::sync::mpsc::channel::<MeshCommand>(16);
+        let mut store = ChatStore::new([7u8; 32], Settings::default(), Vec::new(),
+            tokio::sync::mpsc::unbounded_channel::<RelayCommand>().0, Some(mesh_tx));
+        let peer = [9u8; 8];
+        store.on_mesh_event(MeshEvent::PeerSeen {
+            peer_id: peer,
+            nickname: "phone".into(),
+            noise_public_key: [2u8; 32],
+            is_new: true,
+        });
+
+        store.send_dm_to(peer, &"x".repeat(256));
+        assert!(mesh_rx.try_recv().is_err(), "over-limit DM must not reach the radio");
+        assert!(store.mesh.iter().any(|l| matches!(
+            l,
+            ChatLine::System { text } if text.contains("too long")
+        )));
+
+        // Boundary: exactly 255 bytes is fine.
+        store.send_dm_to(peer, &"y".repeat(255));
+        assert!(mesh_rx.try_recv().is_ok(), "255-byte DM must go out");
     }
 
     #[test]

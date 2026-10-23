@@ -5,7 +5,22 @@
 
 use rand::RngCore;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+
+/// Owner-only permission bits: state files carry the device seed (the
+/// root of every geohash identity) and the Noise identity, so neither the
+/// files nor the directory may be group/world readable. Best effort: a
+/// failure never blocks startup.
+#[cfg(unix)]
+fn restrict(path: &std::path::Path, dir: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if dir { 0o700 } else { 0o600 };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+}
+#[cfg(not(unix))]
+fn restrict(_path: &std::path::Path, _dir: bool) {}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
@@ -57,15 +72,28 @@ pub fn load_or_create_device_seed() -> Result<[u8; 32], String> {
 fn load_or_create_device_seed_in(dir: &std::path::Path) -> Result<[u8; 32], String> {
     let path = dir.join("device-seed.hex");
     if let Ok(hex_str) = fs::read_to_string(&path) {
+        // Repair older installs that wrote the seed world-readable.
+        restrict(dir, true);
+        restrict(&path, false);
         let bytes = hex::decode(hex_str.trim())
             .map_err(|e| format!("corrupt device seed {path:?}: {e}"))?;
         return <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "device seed must be 32 bytes".into());
     }
     let mut seed = [0u8; 32];
     rand::rng().fill_bytes(&mut seed);
-    fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
-    fs::write(&path, hex::encode(seed))
+    fs::create_dir_all(dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    restrict(dir, true);
+    // mode only applies at creation; 0600 keeps the seed private.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
         .map_err(|e| format!("write {path:?}: {e}"))?;
+    use std::io::Write;
+    writeln!(file, "{}", hex::encode(seed)).map_err(|e| format!("write {path:?}: {e}"))?;
+    restrict(&path, false);
     Ok(seed)
 }
 
@@ -87,9 +115,22 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
 
 fn save_settings_in(dir: &std::path::Path, settings: &Settings) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    restrict(dir, true);
     let path = dir.join("settings.json");
-    fs::write(&path, serde_json::to_string_pretty(settings).unwrap())
-        .map_err(|e| format!("write {path:?}: {e}"))
+    // 0600 at creation: settings carry the visited cells and verified
+    // fingerprints, which are nobody else's business.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("write {path:?}: {e}"))?;
+    use std::io::Write;
+    writeln!(file, "{}", serde_json::to_string_pretty(settings).unwrap())
+        .map_err(|e| format!("write {path:?}: {e}"))?;
+    restrict(&path, false);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -649,7 +649,10 @@ impl Engine {
             content: content.to_string(),
         };
         let mut plaintext = vec![NoisePayloadType::PrivateMessage as u8];
-        plaintext.extend_from_slice(&pm.encode().expect("pm TLV"));
+        // The 255-byte TLV bound is enforced by send_dm_to; a caller that
+        // bypasses it must not take the engine task down.
+        let Some(encoded_pm) = pm.encode() else { return vec![] };
+        plaintext.extend_from_slice(&encoded_pm);
         let Ok(frame) = session.send.seal(&plaintext) else { return vec![] };
         let mut packet = Packet::new(
             MessageType::NoiseEncrypted,

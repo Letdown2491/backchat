@@ -41,6 +41,10 @@ actions!(
     ]
 );
 
+/// Composer bound in bytes: far above any real message, far below the
+/// wire's 128 KiB payload ceiling.
+const MAX_INPUT_BYTES: usize = 4096;
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     pub content: SharedString,
@@ -332,6 +336,15 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+
+        // Bound the composer: pasting megabytes would hang the text
+        // layout and then silently fail the wire's 128 KiB payload
+        // ceiling anyway. Edits past the cap are ignored.
+        let resulting = self.content.len() - (range.end - range.start) + new_text.len();
+        if resulting > MAX_INPUT_BYTES {
+            cx.notify();
+            return;
+        }
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
