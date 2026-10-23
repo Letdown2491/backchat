@@ -246,6 +246,19 @@ impl ChatStore {
         self.trim();
     }
 
+    /// Notice only in one DM's history: fingerprint and verification
+    /// output lives with the conversation it verifies.
+    pub fn log_dm(&mut self, peer: &[u8; 8], text: impl Into<String>) {
+        let pending = self.dms.entry(*peer).or_default();
+        pending.push(DmLine {
+            sender: String::new(),
+            content: text.into(),
+            ours: false,
+            timestamp: now_secs(),
+            notice: true,
+        });
+    }
+
     fn trim(&mut self) {
         for log in [&mut self.mesh, &mut self.channel] {
             if log.len() > 1000 {

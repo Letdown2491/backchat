@@ -301,35 +301,45 @@ impl ChatView {
                     (Some("fingerprint"), _) => {
                         // Upstream's layout: uppercase hex, groups of four,
                         // one line per 16 chars, so two humans can diff the
-                        // blocks by eye. Theirs first (needs a handshake),
-                        // then ours.
+                        // blocks by eye. In a DM everything lands in that
+                        // conversation's log; elsewhere just ours.
                         match &self.space {
                             Space::Person(peer, nick) => {
                                 let (peer, nick) = (*peer, nick.clone());
                                 match store.peer_fingerprint(&peer) {
                                     Some(fp) => {
-                                        store.system_line(format!("{nick}'s fingerprint:"));
-                                        store.system_line(format_fingerprint(&fp));
-                                        store.system_line(if store.is_verified_fingerprint(&fp) {
+                                        store.log_dm(&peer, format!("{nick}'s fingerprint:"));
+                                        store.log_dm(&peer, format_fingerprint(&fp));
+                                        store.log_dm(&peer, if store.is_verified_fingerprint(&fp) {
                                             "verified"
                                         } else {
                                             "not verified: compare the blocks with them in person or over a call, then /verify"
                                         });
                                     }
-                                    None => store.system_line(
+                                    None => store.log_dm(
+                                        &peer,
                                         "no handshake yet: their fingerprint shows up after the first message",
                                     ),
                                 }
+                                match store.my_fingerprint() {
+                                    Some(fp) => {
+                                        store.log_dm(&peer, "your fingerprint:");
+                                        store.log_dm(&peer, format_fingerprint(&fp));
+                                    }
+                                    None => store.log_dm(
+                                        &peer,
+                                        "your fingerprint shows up once the mesh radio is up",
+                                    ),
+                                }
                             }
-                            _ => store.log_mesh("open a private chat first (/dm <nick>)"),
-                        }
-                        match store.my_fingerprint() {
-                            Some(fp) => {
-                                store.system_line("your fingerprint:");
-                                store.system_line(format_fingerprint(&fp));
-                            }
-                            None => store
-                                .system_line("your fingerprint shows up once the mesh radio is up"),
+                            _ => match store.my_fingerprint() {
+                                Some(fp) => {
+                                    store.log_mesh("your fingerprint:");
+                                    store.log_mesh(format_fingerprint(&fp));
+                                }
+                                None => store
+                                    .log_mesh("your fingerprint shows up once the mesh radio is up"),
+                            },
                         }
                     }
                     (Some("verify"), _) => match &self.space {
@@ -338,12 +348,12 @@ impl ChatView {
                             match store.peer_fingerprint(&peer) {
                                 Some(fp) => {
                                     store.set_verified(&fp, true);
-                                    store.system_line(format!(
+                                    store.log_dm(&peer, format!(
                                         "{nick} verified: you compared fingerprints out of band"
                                     ));
                                 }
                                 None => store
-                                    .system_line("no handshake yet: nothing to verify"),
+                                    .log_dm(&peer, "no handshake yet: nothing to verify"),
                             }
                         }
                         _ => store.log_mesh("/verify works in a private chat (/dm <nick>)"),
@@ -354,9 +364,9 @@ impl ChatView {
                             match store.peer_fingerprint(&peer) {
                                 Some(fp) => {
                                     store.set_verified(&fp, false);
-                                    store.system_line(format!("{nick}: verification removed"));
+                                    store.log_dm(&peer, format!("{nick}: verification removed"));
                                 }
-                                None => store.system_line("no handshake yet: nothing to unverify"),
+                                None => store.log_dm(&peer, "no handshake yet: nothing to unverify"),
                             }
                         }
                         _ => store.log_mesh("/unverify works in a private chat (/dm <nick>)"),
